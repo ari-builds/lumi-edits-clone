@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="700" viewBox="0 0 400 700">
+  <rect width="400" height="700" fill="#111" />
+  <circle cx="200" cy="320" r="140" fill="#222" />
+  <polygon points="170,250 260,320 170,390" fill="#555" />
+  <text x="200" y="640" font-family="sans-serif" font-size="16" fill="#666" text-anchor="middle">Lumi Edits</text>
+</svg>

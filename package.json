@@ -1,0 +1,12 @@
+{
+  "name": "lumi-edits-clone",
+  "version": "1.0.0",
+  "description": "Mobile-first social video editing platform inspired by lumi-edits.app",
+  "main": "app/app.js",
+  "scripts": {
+    "dev": "vercel dev",
+    "build": "echo 'No build step required - vanilla JS'"
+  },
+  "keywords": ["lumi-edits", "video-editing", "pwa", "reels", "payments"],
+  "license": "MIT"
+}
