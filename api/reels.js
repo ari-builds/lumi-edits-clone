@@ -21,7 +21,7 @@ async function seedIfEmpty(query) {
   if (rows[0] && rows[0].n === 0) {
     for (const r of SEED) {
       await query(
-        'INSERT INTO reels (id, user_id, user, video_url, caption, style, likes, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (id) DO NOTHING',
+        'INSERT INTO reels (id, user_id, username, video_url, caption, style, likes, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (id) DO NOTHING',
         [r.id, 'seed', r.user, r.videoUrl, r.caption, r.style, r.likes, new Date().toISOString()]
       );
     }
@@ -40,7 +40,7 @@ module.exports = async (req, res) => {
       await seedIfEmpty(query);
       const rows = await query('SELECT * FROM reels ORDER BY created_at DESC');
       const reels = rows.map((r) => ({
-        id: r.id, userId: r.user_id, user: r.user, avatar: r.avatar || null,
+        id: r.id, userId: r.user_id, user: r.username, avatar: r.avatar || null,
         videoUrl: r.video_url, caption: r.caption, style: r.style,
         likes: Number(r.likes), comments: [], createdAt: r.created_at,
       }));
@@ -57,7 +57,7 @@ module.exports = async (req, res) => {
       const username = user ? user.username : (body.user || 'you');
       const created = new Date().toISOString();
       await query(
-        'INSERT INTO reels (id, user_id, user, video_url, caption, style, likes, created_at) VALUES ($1,$2,$3,$4,$5,$6,0,$7)',
+        'INSERT INTO reels (id, user_id, username, video_url, caption, style, likes, created_at) VALUES ($1,$2,$3,$4,$5,$6,0,$7)',
         [id, userId, username, String(videoUrl), String(caption || ''), String(style || 'classic'), created]
       );
       return json(res, 201, { reel: { id, userId, user: username, videoUrl: String(videoUrl), caption: String(caption || ''), style: String(style || 'classic'), likes: 0, comments: [], createdAt: created } });
@@ -89,14 +89,14 @@ module.exports = async (req, res) => {
       const username = user ? user.username : (body.user || 'you');
       const cid = newId('c_');
       const created = new Date().toISOString();
-      await query('INSERT INTO comments (id, reel_id, user_id, user, text, created_at) VALUES ($1,$2,$3,$4,$5,$6)', [cid, id, userId, username, String(text), created]);
+      await query('INSERT INTO comments (id, reel_id, user_id, username, text, created_at) VALUES ($1,$2,$3,$4,$5,$6)', [cid, id, userId, username, String(text), created]);
       return json(res, 201, { comment: { id: cid, userId, user: username, text: String(text), createdAt: created } });
     }
 
     if ((m = url.match(/^\/api\/reels\/([^/]+)\/comments$/)) && req.method === 'GET') {
       const id = m[1];
-      const rows = await query('SELECT id, user_id, user, text, created_at FROM comments WHERE reel_id = $1 ORDER BY created_at ASC', [id]);
-      return json(res, 200, { comments: rows.map((c) => ({ id: c.id, userId: c.user_id, user: c.user, text: c.text, createdAt: c.created_at })) });
+      const rows = await query('SELECT id, user_id, username, text, created_at FROM comments WHERE reel_id = $1 ORDER BY created_at ASC', [id]);
+      return json(res, 200, { comments: rows.map((c) => ({ id: c.id, userId: c.user_id, user: c.username, text: c.text, createdAt: c.created_at })) });
     }
 
     json(res, 404, { error: 'not found' });

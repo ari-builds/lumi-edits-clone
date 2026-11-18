@@ -47,7 +47,7 @@ async function ensureSchema() {
     `CREATE TABLE IF NOT EXISTS reels (
        id TEXT PRIMARY KEY,
        user_id TEXT NOT NULL,
-       user TEXT NOT NULL,
+       username TEXT NOT NULL,
        video_url TEXT NOT NULL,
        caption TEXT DEFAULT '',
        style TEXT DEFAULT 'classic',
@@ -63,7 +63,7 @@ async function ensureSchema() {
        id TEXT PRIMARY KEY,
        reel_id TEXT NOT NULL,
        user_id TEXT NOT NULL,
-       user TEXT NOT NULL,
+       username TEXT NOT NULL,
        text TEXT NOT NULL,
        created_at TEXT NOT NULL
      )`,
