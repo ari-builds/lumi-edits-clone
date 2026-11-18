@@ -1,113 +1,104 @@
-// Lumi Edits Clone — Chat API (in-memory demo storage)
-// Endpoints:
-//   GET  /api/chat/conversations        -> { conversations }
-//   GET  /api/chat/conversations/:id    { Authorization } -> { conversation, messages }
-//   POST /api/chat/conversations/:id/messages { Authorization, body: { text, videoUrl } } -> { message }
+// Chat API — persistent conversations/messages in Neon.
+//   GET  /api/chat/conversations              -> { conversations }
+//   GET  /api/chat/conversations/:id          -> { conversation, messages }
+//   POST /api/chat/conversations/:id/messages { text, videoUrl, senderId } -> { message }
 
-const users = [
-  { id: 'u1', username: 'you', avatar: null },
-  { id: 'u2', username: 'mia.edits', avatar: null },
-  { id: 'u3', username: 'kai.cuts', avatar: null },
-  { id: 'u4', username: 'zoe.clips', avatar: null },
+const db = require('./_db');
+
+const DEMO_USERS = [
+  { id: 'u1', username: 'you' },
+  { id: 'u2', username: 'mia.edits' },
+  { id: 'u3', username: 'kai.cuts' },
+  { id: 'u4', username: 'zoe.clips' },
 ];
-
-const conversations = [
-  { id: 'conv1', participants: ['u1', 'u2'], updatedAt: new Date().toISOString() },
-  { id: 'conv2', participants: ['u1', 'u3'], updatedAt: new Date().toISOString() },
-  { id: 'conv3', participants: ['u1', 'u4'], updatedAt: new Date().toISOString() },
+const DEMO_CONVOS = [
+  { id: 'conv1', user1: 'u1', user2: 'u2' },
+  { id: 'conv2', user1: 'u1', user2: 'u3' },
+  { id: 'conv3', user1: 'u1', user2: 'u4' },
 ];
-
-const messages = {
+const DEMO_MESSAGES = {
   conv1: [
-    { id: 'm1', conversationId: 'conv1', senderId: 'u2', text: 'hey! loved your latest reel ✨', videoUrl: null, createdAt: new Date(Date.now() - 3600000).toISOString() },
-    { id: 'm2', conversationId: 'conv1', senderId: 'u1', text: 'thanks mia! what style did you use?', videoUrl: null, createdAt: new Date(Date.now() - 3000000).toISOString() },
+    { id: 'm1', senderId: 'u2', text: 'hey! loved your latest reel ✨', videoUrl: null, ago: 3600000 },
+    { id: 'm2', senderId: 'u1', text: 'thanks mia! what style did you use?', videoUrl: null, ago: 3000000 },
   ],
-  conv2: [
-    { id: 'm3', conversationId: 'conv2', senderId: 'u3', text: 'you want to collab on a new edit?', videoUrl: null, createdAt: new Date(Date.now() - 86400000).toISOString() },
-  ],
-  conv3: [
-    { id: 'm4', conversationId: 'conv3', senderId: 'u4', text: 'matcha theme looks fire 🍵', videoUrl: null, createdAt: new Date(Date.now() - 172800000).toISOString() },
-  ],
+  conv2: [{ id: 'm3', senderId: 'u3', text: 'you want to collab on a new edit?', videoUrl: null, ago: 86400000 }],
+  conv3: [{ id: 'm4', senderId: 'u4', text: 'matcha theme looks fire 🍵', videoUrl: null, ago: 172800000 }],
 };
 
-function json(res, status, body) {
-  res.writeHead(status, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify(body));
-}
-
-function parseBody(req) {
-  return new Promise((resolve) => {
-    let data = '';
-    req.on('data', (chunk) => { data += chunk; });
-    req.on('end', () => {
-      try { resolve(data ? JSON.parse(data) : {}); }
-      catch { resolve({}); }
-    });
-  });
-}
-
-function getToken(req) {
-  const auth = req.headers['authorization'] || '';
-  const m = auth.match(/^Bearer\s+(.+)$/i);
-  return m ? m[1] : null;
+async function seedIfEmpty(query) {
+  const rows = await query('SELECT count(*)::int AS n FROM conversations');
+  if (rows[0] && rows[0].n === 0) {
+    for (const u of DEMO_USERS) {
+      await query('INSERT INTO conv_users (id, username) VALUES ($1,$2) ON CONFLICT (id) DO NOTHING', [u.id, u.username]);
+    }
+    for (const c of DEMO_CONVOS) {
+      await query('INSERT INTO conversations (id, user1, user2, updated_at) VALUES ($1,$2,$3,$4) ON CONFLICT (id) DO NOTHING', [c.id, c.user1, c.user2, new Date().toISOString()]);
+      for (const msg of (DEMO_MESSAGES[c.id] || [])) {
+        await query('INSERT INTO messages (id, conversation_id, sender_id, text, video_url, created_at) VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (id) DO NOTHING',
+          [msg.id, c.id, msg.senderId, msg.text, msg.videoUrl, new Date(Date.now() - msg.ago).toISOString()]);
+      }
+    }
+  }
 }
 
 module.exports = async (req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
-
+  if (db.cors(req, res)) return;
+  const { query, ready, json, parseBody, newId } = db;
+  try { await ready(); } catch (e) { return json(res, 500, { error: 'Database unavailable: ' + e.message }); }
   const url = req.url.split('?')[0];
-  const parts = url.split('/').filter(Boolean); // ['api','chat',...]
+  try {
+    await seedIfEmpty(query);
 
-  // --- List conversations ---
-  if (url === '/api/chat/conversations' && req.method === 'GET') {
-    const list = conversations.map((c) => {
-      const otherId = c.participants.find((p) => p !== 'u1');
-      const other = users.find((u) => u.id === otherId);
-      const lastMsg = (messages[c.id] || []).slice(-1)[0];
-      return {
-        id: c.id,
-        other: other || { username: 'user' },
-        lastMessage: lastMsg ? lastMsg.text : '',
-        lastMessageAt: lastMsg ? lastMsg.createdAt : c.updatedAt,
-        unread: 0,
-      };
-    });
-    return json(res, 200, { conversations: list });
+    if (url === '/api/chat/conversations' && req.method === 'GET') {
+      const convs = await query('SELECT id, user1, user2, updated_at FROM conversations ORDER BY updated_at DESC');
+      const users = await query('SELECT id, username FROM conv_users');
+      const userMap = Object.fromEntries(users.map((u) => [u.id, u.username]));
+      const msgs = await query('SELECT conversation_id, text, created_at FROM messages ORDER BY created_at ASC');
+      const lastByConv = {};
+      for (const m of msgs) lastByConv[m.conversation_id] = m;
+      const list = convs.map((c) => {
+        const otherId = c.user2; // demo layout: other participant
+        const last = lastByConv[c.id];
+        return {
+          id: c.id,
+          other: { id: otherId, username: userMap[otherId] || 'user' },
+          lastMessage: last ? last.text : '',
+          lastMessageAt: last ? last.created_at : c.updated_at,
+          unread: 0,
+        };
+      });
+      return json(res, 200, { conversations: list });
+    }
+
+    let m;
+    if ((m = url.match(/^\/api\/chat\/conversations\/([^/]+)$/)) && req.method === 'GET') {
+      const id = m[1];
+      const conv = (await query('SELECT id, user1, user2, updated_at FROM conversations WHERE id = $1', [id]))[0];
+      if (!conv) return json(res, 404, { error: 'conversation not found' });
+      const msgs = await query('SELECT id, sender_id, text, video_url, created_at FROM messages WHERE conversation_id = $1 ORDER BY created_at ASC', [id]);
+      return json(res, 200, {
+        conversation: conv,
+        messages: msgs.map((x) => ({ id: x.id, conversationId: id, senderId: x.sender_id, text: x.text, videoUrl: x.video_url, createdAt: x.created_at })),
+      });
+    }
+
+    if ((m = url.match(/^\/api\/chat\/conversations\/([^/]+)\/messages$/)) && req.method === 'POST') {
+      const id = m[1];
+      const conv = (await query('SELECT id FROM conversations WHERE id = $1', [id]))[0];
+      if (!conv) return json(res, 404, { error: 'conversation not found' });
+      const body = await parseBody(req);
+      const { text, videoUrl, senderId } = body;
+      if (!text && !videoUrl) return json(res, 400, { error: 'text or videoUrl required' });
+      const mid = newId('m_');
+      const created = new Date().toISOString();
+      await query('INSERT INTO messages (id, conversation_id, sender_id, text, video_url, created_at) VALUES ($1,$2,$3,$4,$5,$6)',
+        [mid, id, senderId || 'u1', String(text || ''), videoUrl || null, created]);
+      await query('UPDATE conversations SET updated_at = $1 WHERE id = $2', [created, id]);
+      return json(res, 201, { message: { id: mid, conversationId: id, senderId: senderId || 'u1', text: String(text || ''), videoUrl: videoUrl || null, createdAt: created } });
+    }
+
+    json(res, 404, { error: 'not found' });
+  } catch (e) {
+    json(res, 500, { error: e.message });
   }
-
-  // --- Get conversation + messages ---
-  const convMatch = url.match(/^\/api\/chat\/conversations\/(conv\d+)$/);
-  if (convMatch && req.method === 'GET') {
-    const id = convMatch[1];
-    const conv = conversations.find((c) => c.id === id);
-    if (!conv) return json(res, 404, { error: 'conversation not found' });
-    return json(res, 200, { conversation: conv, messages: messages[id] || [] });
-  }
-
-  // --- Send message ---
-  const msgMatch = url.match(/^\/api\/chat\/conversations\/(conv\d+)\/messages$/);
-  if (msgMatch && req.method === 'POST') {
-    const id = msgMatch[1];
-    const conv = conversations.find((c) => c.id === id);
-    if (!conv) return json(res, 404, { error: 'conversation not found' });
-    const body = await parseBody(req);
-    const { text, videoUrl } = body;
-    if (!text && !videoUrl) return json(res, 400, { error: 'text or videoUrl required' });
-    const message = {
-      id: 'm' + Date.now(),
-      conversationId: id,
-      senderId: 'u1',
-      text: text || '',
-      videoUrl: videoUrl || null,
-      createdAt: new Date().toISOString(),
-    };
-    if (!messages[id]) messages[id] = [];
-    messages[id].push(message);
-    conv.updatedAt = new Date().toISOString();
-    return json(res, 201, { message });
-  }
-
-  json(res, 404, { error: 'not found' });
 };

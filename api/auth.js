@@ -1,82 +1,69 @@
-// Lumi Edits Clone — Auth API (in-memory demo storage)
-// Endpoints:
-//   POST /api/auth/register  { username, email, password } -> { token, user }
-//   POST /api/auth/login     { email, password }           -> { token, user }
-//   GET  /api/auth/me        Authorization: Bearer <token> -> { user }
+// Auth API — persistent users/sessions in Neon.
+//   POST /api/auth/register { username, email, password } -> { token, user }
+//   POST /api/auth/login    { email, password }           -> { token, user }
+//   GET  /api/auth/me       Authorization: Bearer <token> -> { user }
 
-const users = [];
-const sessions = new Map(); // token -> user
-
-function json(res, status, body) {
-  res.writeHead(status, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify(body));
-}
-
-function parseBody(req) {
-  return new Promise((resolve) => {
-    let data = '';
-    req.on('data', (chunk) => { data += chunk; });
-    req.on('end', () => {
-      try { resolve(data ? JSON.parse(data) : {}); }
-      catch { resolve({}); }
-    });
-  });
-}
-
-function getToken(req) {
-  const auth = req.headers['authorization'] || '';
-  const m = auth.match(/^Bearer\s+(.+)$/i);
-  return m ? m[1] : null;
-}
+const db = require('./_db');
 
 module.exports = async (req, res) => {
-  // CORS for local dev
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
+  if (db.cors(req, res)) return;
+  const { query, ready, hashPassword, verifyPassword, json, parseBody, userFromReq, newId } = db;
+
+  try {
+    await ready();
+  } catch (e) {
+    return json(res, 500, { error: 'Database unavailable: ' + e.message });
+  }
 
   const url = req.url.split('?')[0];
 
-  // --- Register ---
   if (url === '/api/auth/register' && req.method === 'POST') {
     const body = await parseBody(req);
     const { username, email, password } = body;
-    if (!username || !email || !password) {
-      return json(res, 400, { error: 'username, email, and password are required' });
+    if (!username || !email || !password) return json(res, 400, { error: 'username, email, and password are required' });
+    const emailLc = String(email).toLowerCase().trim();
+    try {
+      const existing = await query('SELECT id FROM users WHERE email = $1', [emailLc]);
+      if (existing.length) return json(res, 409, { error: 'email already registered' });
+      const id = newId('u_');
+      const created = new Date().toISOString();
+      await query(
+        'INSERT INTO users (id, username, email, password_hash, created_at) VALUES ($1,$2,$3,$4,$5)',
+        [id, String(username).trim(), emailLc, hashPassword(String(password)), created]
+      );
+      const token = newId('tok_');
+      await query('INSERT INTO sessions (token, user_id, created_at) VALUES ($1,$2,$3)', [token, id, created]);
+      return json(res, 201, { token, user: { id, username: String(username).trim(), email: emailLc, avatar: null } });
+    } catch (e) {
+      return json(res, 500, { error: e.message });
     }
-    if (users.find((u) => u.email === email)) {
-      return json(res, 409, { error: 'email already registered' });
-    }
-    const user = { id: String(users.length + 1), username, email, avatar: null, createdAt: new Date().toISOString() };
-    users.push(user);
-    const token = 'tok_' + Math.random().toString(36).slice(2) + Date.now();
-    sessions.set(token, user);
-    return json(res, 201, { token, user });
   }
 
-  // --- Login ---
   if (url === '/api/auth/login' && req.method === 'POST') {
     const body = await parseBody(req);
     const { email, password } = body;
-    if (!email || !password) {
-      return json(res, 400, { error: 'email and password are required' });
+    if (!email || !password) return json(res, 400, { error: 'email and password are required' });
+    const emailLc = String(email).toLowerCase().trim();
+    try {
+      const rows = await query('SELECT id, username, email, avatar, password_hash FROM users WHERE email = $1', [emailLc]);
+      const user = rows[0];
+      if (!user || !verifyPassword(String(password), user.password_hash)) return json(res, 401, { error: 'invalid credentials' });
+      const token = newId('tok_');
+      await query('INSERT INTO sessions (token, user_id, created_at) VALUES ($1,$2,$3)', [token, user.id, new Date().toISOString()]);
+      return json(res, 200, { token, user: { id: user.id, username: user.username, email: user.email, avatar: user.avatar } });
+    } catch (e) {
+      return json(res, 500, { error: e.message });
     }
-    const user = users.find((u) => u.email === email);
-    if (!user) {
-      return json(res, 401, { error: 'invalid credentials' });
-    }
-    const token = 'tok_' + Math.random().toString(36).slice(2) + Date.now();
-    sessions.set(token, user);
-    return json(res, 200, { token, user });
   }
 
-  // --- Me ---
   if (url === '/api/auth/me' && req.method === 'GET') {
-    const token = getToken(req);
-    if (!token || !sessions.has(token)) {
-      return json(res, 401, { error: 'not authenticated' });
+    try {
+      const user = await userFromReq(req);
+      if (!user) return json(res, 401, { error: 'not authenticated' });
+      return json(res, 200, { user });
+    } catch (e) {
+      return json(res, 500, { error: e.message });
     }
-    return json(res, 200, { user: sessions.get(token) });
   }
 
   json(res, 404, { error: 'not found' });
