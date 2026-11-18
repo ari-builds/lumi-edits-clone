@@ -1,5 +1,0 @@
-AWS_ACCESS_KEY_ID=nak_live_fa7f32562ccd4a4291c90127f8ffe552
-AWS_SECRET_ACCESS_KEY=nsk_live_2ffbc57514f754ec02b823cf6038caa839e05355a5e33420c2d36e1879f29657
-AWS_ENDPOINT_URL_S3=https://br-tiny-dust-bdoop9n2.storage.c-8.us-east-2.aws.neon.tech
-AWS_REGION=us-east-2
-S3_BUCKET=lumi-media
