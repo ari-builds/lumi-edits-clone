@@ -430,18 +430,40 @@ const app = {
       e.preventDefault();
       const fd = new FormData(form);
       const submit = document.getElementById('newreel-submit');
+      const file = fd.get('video');
       try {
         submit.disabled = true;
+        submit.textContent = 'Uploading…';
+
+        let videoUrl = '';
+        if (file && file.size > 0) {
+          // 1. Ask the API for a presigned PUT URL
+          const signed = await this.request('/upload', {
+            method: 'POST',
+            body: { fileName: file.name || 'reel.mp4', fileType: file.type || 'video/mp4' },
+          });
+          // 2. Upload the actual file bytes directly to permanent storage
+          submit.textContent = 'Uploading video…';
+          const put = await fetch(signed.uploadUrl, {
+            method: 'PUT',
+            headers: { 'Content-Type': file.type || 'video/mp4' },
+            body: file,
+          });
+          if (!put.ok) throw new Error('Video upload failed (' + put.status + ')');
+          videoUrl = signed.publicUrl;
+        }
+
         submit.textContent = 'Publishing…';
         const payload = {
           userId: this.state.user?.id || 'u1',
           user: this.state.user?.username || 'you',
-          videoUrl: fd.get('video') ? URL.createObjectURL(fd.get('video')) : '',
+          videoUrl,
           caption: fd.get('caption') || '',
           style: fd.get('style') || 'classic',
         };
         const data = await this.request('/reels', { method: 'POST', body: payload });
         this.state.reels.unshift(data.reel);
+        this.renderReels();
         document.getElementById('newreel-form').classList.add('hidden');
         document.getElementById('newreel-success').classList.remove('hidden');
         this.toast('Reel published!');
