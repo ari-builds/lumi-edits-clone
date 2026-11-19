@@ -24,7 +24,10 @@ async function notify(site, ref, payload) {
   const to = process.env.LEAD_TO_EMAIL;
   if (!key || !to) return false;
   const contact = payload.contact || {};
-  const estimate = payload.estimate || {};
+  // Some estimators call the selection "job" and the figure "quote"; others
+  // use "surface" / "estimate". Support both shapes.
+  const estimate = payload.estimate || payload.quote || {};
+  const subject = (payload.surface || payload.job || {}).label || '';
   const text = [
     `New written estimate request — ${site || 'estimator'}`,
     '',
@@ -34,7 +37,7 @@ async function notify(site, ref, payload) {
     `Email: ${contact.email || ''}`,
     `Address: ${contact.address || ''}`,
     '',
-    `Surface: ${(payload.surface || {}).label || ''}`,
+    `Surface/Job: ${subject}`,
     `Area: ${JSON.stringify(payload.area || {})}`,
     `Total: ${estimate.currency || 'USD'} ${estimate.total || ''} (band ${estimate.min || ''}-${estimate.max || ''})`,
     `Page: ${(payload.meta || {}).page || ''}`,
