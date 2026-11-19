@@ -811,7 +811,6 @@ const app = {
         <div class="reel-actions">
           <button class="icon-btn ${r.liked ? 'active' : ''}" onclick="app.toggleLike('${this.jsAttr(r.id)}')" aria-label="Like">♥ <span class="like-count" id="like-count-${this.esc(id)}">${this.esc(r.likes || 0)}</span></button>
           <button class="icon-btn" onclick="app.openComments('${this.jsAttr(r.id)}')" aria-label="Comments">▤</button>
-          <button class="icon-btn" onclick="app.shareReel('${this.jsAttr(r.id)}')" aria-label="Share">↗</button>
         </div>
         <div class="reel-caption">
           <div class="user">${this.esc(r.user || 'you')}</div>
@@ -832,22 +831,6 @@ const app = {
     v.muted = !v.muted;
     if (!v.muted) v.play().catch(() => {});
     if (pill) pill.textContent = v.muted ? '♪ Sound off' : '♪ Sound on';
-  },
-
-  async shareReel(reelId) {
-    const reel = this.state.reels.find((r) => String(r.id) === String(reelId));
-    if (!reel) return;
-    const url = `${location.origin}/r/${reelId}`;
-    try {
-      if (navigator.share) {
-        await navigator.share({ title: reel.title || 'Lumi Reel', text: reel.title || 'Check out this reel', url });
-      } else {
-        await navigator.clipboard.writeText(url);
-        this.toast('Link copied to clipboard');
-      }
-    } catch (e) {
-      this.toast('Could not share reel');
-    }
   },
 
   async toggleLike(reelId) {

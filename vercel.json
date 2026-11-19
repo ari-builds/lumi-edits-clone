@@ -7,6 +7,7 @@
     { "src": "api/drafts.js", "use": "@vercel/node" },
     { "src": "api/intent.js", "use": "@vercel/node" },
     { "src": "api/lead.js", "use": "@vercel/node" },
+    { "src": "api/health.js", "use": "@vercel/node" },
     { "src": "api/pay.js", "use": "@vercel/node" },
     { "src": "api/reels.js", "use": "@vercel/node" },
     { "src": "api/state.js", "use": "@vercel/node" },
@@ -15,7 +16,7 @@
     { "src": "app/**", "use": "@vercel/static" }
   ],
   "routes": [
-    { "src": "/api/(auth|reels|styles|chat|pay|upload|state|intent|lead|drafts|covers)(/.*)?", "dest": "/api/$1.js" },
+    { "src": "/api/(auth|reels|styles|chat|pay|upload|state|intent|lead|health|drafts|covers)(/.*)?", "dest": "/api/$1.js" },
     { "src": "/app/(.*)", "dest": "/app/$1" },
     { "src": "/(.*)", "dest": "/app/index.html" }
   ]
