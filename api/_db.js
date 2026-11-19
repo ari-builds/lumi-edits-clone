@@ -114,6 +114,14 @@ async function ensureSchema() {
        payload TEXT DEFAULT '',
        created_at TEXT NOT NULL
      )`,
+    `CREATE TABLE IF NOT EXISTS estimator_leads (
+       id TEXT PRIMARY KEY,
+       site TEXT NOT NULL DEFAULT '',
+       reference TEXT NOT NULL,
+       payload TEXT NOT NULL,
+       notified INTEGER NOT NULL DEFAULT 0,
+       created_at TEXT NOT NULL
+     )`,
     `CREATE TABLE IF NOT EXISTS uploads (
        id TEXT PRIMARY KEY,
        user_id TEXT,

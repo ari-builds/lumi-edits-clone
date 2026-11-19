@@ -19,7 +19,7 @@ const db = require('../api/_db');
 
 const TABLES = [
   'users', 'sessions', 'reels', 'reel_versions', 'reel_notes',
-  'drafts', 'covers', 'intents', 'events', 'uploads',
+  'drafts', 'covers', 'intents', 'events', 'uploads', 'estimator_leads',
   'conv_users', 'conversations', 'messages',
 ];
 
