@@ -1,5 +1,7 @@
-// Lumi Edits Clone — Styles API (in-memory demo storage)
-// Endpoint: GET /api/styles -> { styles }
+// Lumi Edits Clone — Styles/Catalog API (static, no dependencies).
+//   GET /api/styles -> { styles, templates, captions, motion, vfx, grades, hooks, backgrounds, music, voices, formats, intensities }
+
+const { catalog } = require('./_catalog');
 
 const styles = [
   { id: 'classic', name: 'Classic', preview: 'paper', accent: '#141518', desc: 'Clean paper background, bold ink text.' },
@@ -19,14 +21,18 @@ function json(res, status, body) {
   res.end(JSON.stringify(body));
 }
 
-module.exports = (req, res) => {
+function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
   const url = req.url.split('?')[0];
   if (url === '/api/styles' && req.method === 'GET') {
-    return json(res, 200, { styles });
+    return json(res, 200, Object.assign({ styles }, catalog));
   }
   json(res, 404, { error: 'not found' });
-};
+}
+
+module.exports = handler;
+module.exports.styles = styles;
+module.exports.catalog = catalog;

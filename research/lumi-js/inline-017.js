@@ -1,0 +1,2 @@
+/* [M5 Max MBP] 2026-09-27 header gap fix: toggle the solid header once the page leaves the top */
+(function(){var t,f=function(){t=t||document.querySelector('header.top');if(t)t.classList.toggle('scrolled',(typeof pageY==='function'?pageY():(window.scrollY||document.documentElement.scrollTop))>6)};document.addEventListener('scroll',f,{passive:true,capture:true});addEventListener('load',f);f();})();   /* [M5 Max MBP] 2026-09-30 (chat layout agent): also hears the chat list, which scrolls instead of the window */

@@ -5,7 +5,11 @@
   "main": "app/app.js",
   "scripts": {
     "dev": "vercel dev",
-    "build": "echo 'No build step required - vanilla JS'"
+    "build": "echo 'No build step required - vanilla JS'",
+    "smoke:parity": "node tools/smoke-lumi-parity.cjs",
+    "smoke:flow": "node tools/smoke-lumi-flow.cjs",
+    "check:db": "node tools/check-db.cjs",
+    "extract:lumi": "node tools/extract-lumi-scripts.cjs"
   },
   "keywords": ["lumi-edits", "video-editing", "pwa", "reels", "payments"],
   "license": "MIT"

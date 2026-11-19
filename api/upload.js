@@ -1,9 +1,11 @@
 // Upload API — issues presigned PUT URLs for real video storage in Neon Object Storage.
-//   POST /api/upload  { fileName, fileType } -> { uploadUrl, publicUrl, key, ... }
+//   POST /api/upload  { fileName, fileType, reel, batch, of, kind } -> { uploadUrl, publicUrl, pathname, key, ... }
 // The browser then does: fetch(uploadUrl, { method: 'PUT', body: file, headers: { 'Content-Type': fileType } })
 // The returned publicUrl is a permanent URL used as a reel's videoUrl.
+// Upload metadata is best-effort: a DB problem never fails the presign.
 
 const { presignPut } = require('./_s3');
+const db = require('./_db');
 
 function json(res, status, body) {
   res.writeHead(status, { 'Content-Type': 'application/json' });
@@ -39,7 +41,26 @@ module.exports = async (req, res) => {
   const key = `reels/${Date.now()}-${Math.random().toString(36).slice(2, 8)}-${safeName(fileName)}`;
   try {
     const signed = presignPut({ key, contentType: String(fileType), expires: 900 });
-    return json(res, 201, { ...signed, note: 'Upload the file with PUT to uploadUrl, then use publicUrl as videoUrl.' });
+
+    // Optional bookkeeping. Intentionally swallowed — presigning must still work
+    // when the database is unavailable or the metadata table is missing.
+    try {
+      await db.ready();
+      const user = await db.userFromReq(req).catch(() => null);
+      const reelId = body.reel && typeof body.reel === 'object' ? body.reel.id : body.reel;
+      await db.query(
+        'INSERT INTO uploads (id, user_id, reel_id, batch, of_index, kind, object_key, public_url, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)',
+        [db.newId('up_'), user ? user.id : null, reelId ? String(reelId) : null,
+          String(body.batch || ''), Number(body.of || 0) || 0, String(body.kind || ''),
+          key, signed.publicUrl, new Date().toISOString()]
+      );
+    } catch (_) { /* best effort only */ }
+
+    return json(res, 201, {
+      ...signed,
+      pathname: key,
+      note: 'Upload the file with PUT to uploadUrl, then use publicUrl as videoUrl.',
+    });
   } catch (e) {
     return json(res, 500, { error: 'Could not sign upload: ' + e.message });
   }

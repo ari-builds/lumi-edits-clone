@@ -1,11 +1,20 @@
 {
   "version": 2,
   "builds": [
-    { "src": "api/*.js", "use": "@vercel/node" },
+    { "src": "api/auth.js", "use": "@vercel/node" },
+    { "src": "api/chat.js", "use": "@vercel/node" },
+    { "src": "api/covers.js", "use": "@vercel/node" },
+    { "src": "api/drafts.js", "use": "@vercel/node" },
+    { "src": "api/intent.js", "use": "@vercel/node" },
+    { "src": "api/pay.js", "use": "@vercel/node" },
+    { "src": "api/reels.js", "use": "@vercel/node" },
+    { "src": "api/state.js", "use": "@vercel/node" },
+    { "src": "api/styles.js", "use": "@vercel/node" },
+    { "src": "api/upload.js", "use": "@vercel/node" },
     { "src": "app/**", "use": "@vercel/static" }
   ],
   "routes": [
-    { "src": "/api/(auth|reels|styles|chat|pay|upload)(/.*)?", "dest": "/api/$1.js" },
+    { "src": "/api/(auth|reels|styles|chat|pay|upload|state|intent|drafts|covers)(/.*)?", "dest": "/api/$1.js" },
     { "src": "/app/(.*)", "dest": "/app/$1" },
     { "src": "/(.*)", "dest": "/app/index.html" }
   ]

@@ -1,6 +1,6 @@
 # Lumi Edits
 
-Mobile-first social video editing app — your own version of Lumi, deployed on Vercel.
+A working, phone-first replica of the user's own Lumi app: a PWA with a real browser editing engine and persistent backend state.
 
 **Live:** https://lumi-edits-clone.vercel.app
 **GitHub:** https://github.com/ari-builds/lumi-edits-clone
@@ -9,55 +9,77 @@ Mobile-first social video editing app — your own version of Lumi, deployed on 
 
 | Feature | Status | Backing |
 |---|---|---|
-| Accounts (register / login / session) | ✅ Real | Neon Postgres, scrypt-hashed passwords |
-| Reels feed | ✅ Real | Postgres; seeded demo reels + your uploads |
-| Publish a reel with a video file | ✅ Real | Video bytes uploaded to Neon Object Storage; permanent public URL |
-| Like / comment | ✅ Real | Postgres (likes deduplicated per user) |
-| Chat conversations & messages | ✅ Real | Postgres (seeded demo threads) |
-| Pay flow (intent + confirm + history) | ⚠️ Demo | Persistent records, but **no real card charge** (no Stripe) |
-| Trim scrub bar, style selection | ✅ UI | Local preview; no server-side transcoding/filters applied to the exported video |
+| Accounts (register / login / session) | Real | Neon Postgres, scrypt-hashed passwords |
+| Reels feed, likes, comments | Real | Postgres; seeded demo reels + uploaded reels |
+| New reel flow: Clips → Title → Brief | Real | Draft state in Postgres + local browser cache |
+| Upload clips | Real | Neon Object Storage presigned PUT |
+| Film with Lumi | Real where supported | `getUserMedia`, canvas-framed recording, take verdict, IndexedDB takes |
+| Local trim / crop / look / captions / hook / CTA export | Real where supported | `canvas.captureStream()` + `MediaRecorder` in `app/editor.js` |
+| Drafts, covers, timecoded notes, versions, review state | Real | `drafts`, `covers`, `reel_notes`, `reel_versions`, `intents`, `events` tables |
+| Styles catalog (templates, captions, motion, VFX, grades, hooks, backgrounds, music, voices, formats, intensity) | Real | `/api/styles`, `/api/state` |
+| Cover editor + Post kit | Real | `LumiEditor.drawCover()`, `/api/covers`, intent log |
+| Chat with attachments | Real | Postgres messages; uploads via presigned PUT |
+| PWA install + offline shell | Real | Manifest, service worker (`lumi-v2`) |
+| Payments | Demo only | Intents are recorded, but **no real card charge** (no Stripe keys) |
 
-### Honest limitations
-- **No video editing engine.** The trim bar is a UI preview; the uploaded video is stored as-is (not actually cut or filtered). Lumi's proprietary transcoding/filter pipeline is not reproduced.
-- **Payments are simulated.** Intents/confirmations are stored, but no money moves. Add Stripe keys to make it real.
-- **Demo seed content** uses public sample videos; chat/reels seeds are sample data.
-- Video files are stored in a **public-read** bucket — anyone with the URL can view them. Don't upload private content.
+## Honest limitations
 
-## Design system
-- Paper theme `#f6f3ec` / ink `#141518` / accent `#2f6fd0`, dark mode, 10 look themes.
+- The shipped Lumi client is a thin front end over a remote human/AI editing service. This replica deliberately adds a real local renderer, but it cannot reproduce Lumi's proprietary remote pipeline.
+- Local export requires a browser with `MediaRecorder` and `HTMLCanvasElement.captureStream()`. MP4 is preferred; browsers without MP4 encoding get WebM.
+- Export is real-time: the source plays for the selected duration while frames are drawn and recorded.
+- Local export uses one lead clip. Additional clips are uploaded as raw footage and described in the brief.
+- Cross-origin media without CORS can taint the canvas and block export. Blob/object URLs are safe.
+- "Paste a link" intake stores the link and brief honestly; it does **not** download YouTube/Instagram/TikTok/Vimeo/Drive/Dropbox media or cut it into shorts locally. Those reels are marked `waiting`.
+- AI voiceover, trending-music licensing, reference-video matching, background cutout, Hook pack generation, human team replies, and revision execution require the remote Lumi service.
+- Payments are simulated. The Pay page does not collect card details and clearly states that checkout is not connected.
+- Cover art, captions, hashtags, and hooks in Post kit are generated locally and deterministically; they are not an LLM service.
 
 ## Architecture
-```
-api/
-  _db.js       Neon SQL-over-HTTP helper (zero deps, lazy schema init)
-  _s3.js       AWS SigV4 presigned PUT generator (zero deps)
-  auth.js      users + sessions (scrypt)
-  reels.js     reels + likes + comments
-  chat.js      conversations + messages
-  pay.js       intents + confirmations + history
-  upload.js    presigned upload URLs -> Neon Object Storage
-  styles.js    static style catalog
-app/           vanilla-JS SPA (PWA) — no build step
-```
 
-### Backend services (separate Neon project from OpenReply)
-- **Postgres:** dedicated `lumi-edits` Neon project (`DATABASE_URL`)
-- **Object Storage:** `lumi-media` public bucket on a us-east-2 Neon branch (`AWS_*` + `S3_BUCKET` env)
-- All secrets live in Vercel env (production + preview), never in the repo.
+- `app/` — vanilla JS PWA shell, SPA logic, and `editor.js` browser renderer. No npm dependencies, no build step.
+- `api/` — zero-dependency Vercel serverless functions using Neon SQL-over-HTTP (`neon-connection-string` header).
+- Neon Object Storage — public media bucket reached through zero-dep AWS SigV4 presigned PUT URLs in `api/_s3.js`.
+- `research/` — saved shipped Lumi client, extracted inline scripts, REA evidence, and the capability/gap ledger used to drive parity.
 
-## Local development
+### Environment variables (names only)
+
+Set these in Vercel (Production and Preview) and in a gitignored `.env.local` for local work:
+
+- `DATABASE_URL`
+- `S3_BUCKET`, `AWS_REGION`, `AWS_ENDPOINT_URL_S3`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`
+
+Never commit or paste secret values.
+
+## Development
+
 ```bash
-vercel dev          # API + static, needs .env.local with DATABASE_URL + AWS_* + S3_BUCKET
+npm run dev
 ```
-`vercel env pull` to fetch dev env. Opening `app/index.html` statically works for UI only (no API).
 
-## Tests
-- `tools/test-neon.cjs` — Neon HTTP connectivity
-- `tools/test-upload.cjs` — presign → PUT → GET round-trip (reads env vars)
-- `tools/set-env.cjs` — set Vercel env vars via API using local CLI token (reads `.env-values.json`, gitignored)
+## Verification
 
-## Deployment
-Push to `master`; Vercel auto-deploys. Manual: `vercel deploy --prod --yes`.
+```bash
+npm run check:db                        # verifies Neon schema and required columns
+npm run smoke:parity                    # remote smoke checks against the live deployment
+```
 
-## License
-MIT
+Override the smoke target and add auth without exposing credentials in output:
+
+```powershell
+$env:BASE_URL = 'https://lumi-edits-clone.vercel.app'
+$env:LUMI_TOKEN = '<token>'
+npm run smoke:parity
+```
+
+For a hands-free run, `LUMI_SMOKE_CREATE_USER=1` registers a throwaway account and caches its token in the gitignored `.smoke-token` file. It never prints the token or password.
+
+Optional full upload round trip:
+
+```powershell
+$env:LUMI_SMOKE_UPLOAD = '1'
+npm run smoke:parity
+```
+
+## Reverse engineering note
+
+REA MCP tools were not registered in the working session, so the documented CLI fallback was used (`rea-agents@6.7.0 doctor` and `analyze-javascript-application`). The large main inline script timed out under the analyzer's source timeout; the capability inventory was therefore completed with direct static reads plus successful REA passes over the smaller inline scripts. All findings are recorded in `research/CAPABILITY-GAP-LEDGER.md`.

@@ -1,0 +1,9 @@
+research/
+tools/
+node_modules/
+.env
+.env.*
+.smoke-token
+*.log
+README.md
+.git/

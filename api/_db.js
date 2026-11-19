@@ -54,6 +54,77 @@ async function ensureSchema() {
        likes INTEGER NOT NULL DEFAULT 0,
        created_at TEXT NOT NULL
      )`,
+    // Extended reel workflow fields (safe against databases created by earlier versions).
+    `ALTER TABLE reels ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'review'`,
+    `ALTER TABLE reels ADD COLUMN IF NOT EXISTS title TEXT DEFAULT ''`,
+    `ALTER TABLE reels ADD COLUMN IF NOT EXISTS brief TEXT DEFAULT ''`,
+    `ALTER TABLE reels ADD COLUMN IF NOT EXISTS look TEXT DEFAULT 'classic'`,
+    `ALTER TABLE reels ADD COLUMN IF NOT EXISTS format TEXT DEFAULT 'vertical'`,
+    `ALTER TABLE reels ADD COLUMN IF NOT EXISTS revision INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE reels ADD COLUMN IF NOT EXISTS revision_limit INTEGER NOT NULL DEFAULT 5`,
+    `ALTER TABLE reels ADD COLUMN IF NOT EXISTS no_music_url TEXT DEFAULT ''`,
+    `ALTER TABLE reels ADD COLUMN IF NOT EXISTS source_kind TEXT DEFAULT ''`,
+    `ALTER TABLE reels ADD COLUMN IF NOT EXISTS source_url TEXT DEFAULT ''`,
+    `ALTER TABLE reels ADD COLUMN IF NOT EXISTS shorts INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE reels ADD COLUMN IF NOT EXISTS updated_at TEXT NOT NULL DEFAULT ''`,
+    `CREATE TABLE IF NOT EXISTS reel_versions (
+       reel_id TEXT NOT NULL,
+       version INTEGER NOT NULL,
+       video_url TEXT NOT NULL,
+       no_music_url TEXT DEFAULT '',
+       poster_url TEXT DEFAULT '',
+       note TEXT DEFAULT '',
+       created_at TEXT NOT NULL,
+       PRIMARY KEY (reel_id, version)
+     )`,
+    `CREATE TABLE IF NOT EXISTS reel_notes (
+       id TEXT PRIMARY KEY,
+       reel_id TEXT NOT NULL,
+       version INTEGER NOT NULL DEFAULT 1,
+       t REAL NOT NULL DEFAULT 0,
+       t_end REAL,
+       text TEXT NOT NULL,
+       kind TEXT NOT NULL DEFAULT 'note',
+       status TEXT NOT NULL DEFAULT 'open',
+       created_at TEXT NOT NULL
+     )`,
+    `CREATE TABLE IF NOT EXISTS drafts (
+       user_id TEXT PRIMARY KEY,
+       data TEXT NOT NULL,
+       updated_at TEXT NOT NULL
+     )`,
+    `CREATE TABLE IF NOT EXISTS covers (
+       reel_id TEXT PRIMARY KEY,
+       data TEXT NOT NULL,
+       updated_at TEXT NOT NULL
+     )`,
+    `CREATE TABLE IF NOT EXISTS intents (
+       id TEXT PRIMARY KEY,
+       user_id TEXT,
+       kind TEXT NOT NULL,
+       reel_id TEXT,
+       payload TEXT DEFAULT '',
+       idem TEXT UNIQUE,
+       created_at TEXT NOT NULL
+     )`,
+    `CREATE TABLE IF NOT EXISTS events (
+       id TEXT PRIMARY KEY,
+       user_id TEXT,
+       kind TEXT NOT NULL,
+       payload TEXT DEFAULT '',
+       created_at TEXT NOT NULL
+     )`,
+    `CREATE TABLE IF NOT EXISTS uploads (
+       id TEXT PRIMARY KEY,
+       user_id TEXT,
+       reel_id TEXT,
+       batch TEXT DEFAULT '',
+       of_index INTEGER NOT NULL DEFAULT 0,
+       kind TEXT DEFAULT '',
+       object_key TEXT NOT NULL,
+       public_url TEXT NOT NULL,
+       created_at TEXT NOT NULL
+     )`,
     `CREATE TABLE IF NOT EXISTS reel_likes (
        reel_id TEXT NOT NULL,
        user_id TEXT NOT NULL,
@@ -162,4 +233,76 @@ function cors(req, res) {
   return false;
 }
 
-module.exports = { query, ready, hashPassword, verifyPassword, newId, json, parseBody, getToken, userFromReq, cors };
+// --- small row shapers shared by endpoints ---
+function parseJson(text, fallback) {
+  if (text == null || text === '') return fallback;
+  try { return JSON.parse(text); } catch { return fallback; }
+}
+
+function versionShape(row) {
+  if (!row) return null;
+  return {
+    version: Number(row.version || 1),
+    videoUrl: row.video_url || '',
+    noMusicUrl: row.no_music_url || '',
+    posterUrl: row.poster_url || '',
+    note: row.note || '',
+    createdAt: row.created_at || '',
+  };
+}
+
+function noteShape(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    reelId: row.reel_id,
+    version: Number(row.version || 1),
+    t: Number(row.t || 0),
+    tEnd: row.t_end == null ? null : Number(row.t_end),
+    text: row.text || '',
+    kind: row.kind || 'note',
+    status: row.status || 'open',
+    createdAt: row.created_at || '',
+  };
+}
+
+function reelShape(row, versions = [], notes = []) {
+  if (!row) return null;
+  const vs = Array.isArray(versions) ? versions : [];
+  const ns = Array.isArray(notes) ? notes : [];
+  const last = vs.length ? vs[vs.length - 1] : null;
+  const lastPoster = last ? (last.posterUrl || last.poster_url || '') : '';
+  const lastNoMusic = last ? (last.noMusicUrl || last.no_music_url || '') : '';
+  return {
+    id: row.id,
+    userId: row.user_id,
+    user: row.username,
+    avatar: row.avatar || null,
+    videoUrl: row.video_url || '',
+    noMusicUrl: row.no_music_url || lastNoMusic || '',
+    posterUrl: row.poster_url || lastPoster || '',
+    caption: row.caption || '',
+    title: row.title || '',
+    brief: row.brief || '',
+    look: row.look || 'classic',
+    format: row.format || 'vertical',
+    status: row.status || 'review',
+    revision: Number(row.revision || 0),
+    revisionLimit: Number(row.revision_limit || 5),
+    sourceKind: row.source_kind || '',
+    sourceUrl: row.source_url || '',
+    shorts: Number(row.shorts || 0),
+    style: row.style || 'classic',
+    likes: Number(row.likes || 0),
+    comments: [],
+    versions: vs,
+    notes: ns,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at || row.created_at,
+  };
+}
+
+module.exports = {
+  query, ready, hashPassword, verifyPassword, newId, json, parseBody, getToken, userFromReq, cors,
+  parseJson, versionShape, noteShape, reelShape,
+};

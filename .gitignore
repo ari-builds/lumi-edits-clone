@@ -8,3 +8,7 @@ Thumbs.db
 
 .vercel
 tools/s3-env.txt
+.smoke-token
+
+# Large generated reverse-engineering evidence — kept locally, not committed.
+research/rea-evidence*.json

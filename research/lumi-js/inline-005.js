@@ -1,0 +1,1 @@
+/* BGHDR69 [M5 Max MBP] 2026-10-30: the top bar is see-through over the Lumi scene, frosted again once the page scrolls */(function(){var m=document.getElementById("main"),t=document.querySelector("header.top");if(!m||!t)return;m.addEventListener("scroll",function(){t.classList.toggle("bgscr",m.scrollTop>24)},{passive:true});})();

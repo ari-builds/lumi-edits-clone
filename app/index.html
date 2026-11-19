@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
   <title>Lumi Edits</title>
   <meta name="description" content="Mobile-first social video editing platform" />
   <meta name="mobile-web-app-capable" content="yes" />
@@ -17,9 +17,10 @@
 </head>
 <body>
   <div id="app">
-    <!-- Auth overlay -->
+    <!-- Auth overlay (preserved ids for existing auth behavior) -->
     <div id="auth-overlay" class="overlay hidden">
-      <div class="card">
+      <div class="card auth-card">
+        <div class="auth-brand"><span class="brand-mark">✦</span> Lumi</div>
         <h2>Welcome to Lumi</h2>
         <p class="sub">Create, edit, share. Join the feed.</p>
         <div class="auth-tabs" role="tablist">
@@ -30,15 +31,15 @@
           <input type="hidden" id="auth-mode" value="login" />
           <div class="field">
             <label>Username</label>
-            <input type="text" name="username" placeholder="mia.edits" required />
+            <input type="text" name="username" placeholder="mia.edits" required autocomplete="username" />
           </div>
           <div class="field">
             <label>Email</label>
-            <input type="email" name="email" placeholder="you@lumi.app" required />
+            <input type="email" name="email" placeholder="you@lumi.app" required autocomplete="email" />
           </div>
           <div class="field">
             <label>Password</label>
-            <input type="password" name="password" placeholder="••••••••" required />
+            <input type="password" name="password" placeholder="••••••••" required autocomplete="current-password" />
           </div>
           <button type="submit" class="btn btn-primary btn-block" id="auth-btn">Continue</button>
           <p class="auth-toggle" id="auth-toggle">Don't have an account? <span>Create one</span></p>
@@ -49,17 +50,27 @@
     <!-- Main shell (hidden until authed) -->
     <header class="shell-header hidden" id="shell-header">
       <div class="header-row">
-        <button class="icon-btn" id="menu-btn" aria-label="Menu">☰</button>
-        <strong class="brand">Lumi Edits</strong>
-        <button class="icon-btn" id="profile-btn" aria-label="Profile">👤</button>
+        <button class="icon-btn" id="menu-btn" aria-label="Appearance and menu">☰</button>
+        <strong class="brand"><span class="brand-mark">✦</span> Lumi <span class="brand-sub">Edits</span></strong>
+        <div class="header-actions">
+          <button class="icon-btn" id="inbox-btn" aria-label="Inbox">✉</button>
+          <button class="btn btn-primary btn-sm" id="header-newreel">New reel</button>
+        </div>
       </div>
     </header>
 
-    <!-- Tab views -->
     <main class="shell-main" id="shell-main">
 
       <!-- Reels -->
       <section id="view-reels" class="view" data-tab="reels">
+        <div class="reels-toolbar">
+          <h2 class="view-title">Reels</h2>
+          <div class="filter-chips" id="reels-filters">
+            <button class="chip active" data-filter="mine" onclick="app.setReelFilter('mine')">Mine</button>
+            <button class="chip" data-filter="all" onclick="app.setReelFilter('all')">All</button>
+            <button class="chip" data-filter="review" onclick="app.setReelFilter('review')">Review</button>
+          </div>
+        </div>
         <div class="reels-feed" id="reels-feed">
           <div class="reel-card skeleton" style="--aspect:9/16;">
             <div class="skeleton-img"></div><div class="skeleton-text"></div>
@@ -69,7 +80,7 @@
           </div>
         </div>
         <div id="reels-empty" class="empty hidden">
-          <p>No reels yet. Create your first one!</p>
+          <p>No reels here yet. Start one with <strong>New reel</strong>.</p>
         </div>
       </section>
 
@@ -77,176 +88,99 @@
       <section id="view-styles" class="view hidden" data-tab="styles">
         <header class="view-header">
           <h2>Styles</h2>
-          <p class="muted">Pick a look for your next edit.</p>
+          <p class="muted">Pick a look for your next edit. Selections save to your draft.</p>
         </header>
-        <div class="styles-grid" id="styles-grid">
-          <!-- populated by JS -->
+        <div class="segmented" id="styles-tabs"></div>
+        <div class="style-shortcuts">
+          <button class="btn btn-ghost btn-sm" onclick="app.loadPersonalStyle()">Your personal style</button>
+          <button class="btn btn-ghost btn-sm" onclick="app.sameAsLastTime()">Same as last time</button>
         </div>
+        <div class="styles-grid" id="styles-grid"></div>
+        <div id="styles-extra" class="styles-extra"></div>
         <div id="styles-empty" class="empty hidden">
-          <p>No styles available.</p>
+          <p>No styles available in this deployment.</p>
         </div>
       </section>
 
-      <!-- New Reel -->
+      <!-- New Reel stepper -->
       <section id="view-newreel" class="view hidden" data-tab="newreel">
-        <header class="view-header">
-          <h2>New Reel</h2>
-          <p class="muted">Trim, style, publish.</p>
-        </header>
-        <form id="newreel-form" novalidate>
-          <div class="field">
-            <label>Video file</label>
-            <input type="file" name="video" accept="video/*" id="newreel-video" required />
-          </div>
-          <div class="trim-preview" id="trim-preview">
-            <video id="trim-video" preload="metadata" muted playsinline></video>
-            <div class="trim-overlay">
-              <span id="trim-current">0:00</span>
-              <span id="trim-duration">/ 0:00</span>
-            </div>
-            <input type="range" id="trim-slider" min="0" max="100" value="100" />
-          </div>
-          <div class="field">
-            <label>Caption</label>
-            <input type="text" name="caption" placeholder="What's happening?" />
-          </div>
-          <div class="field">
-            <label>Style</label>
-            <select name="style" id="newreel-style">
-              <option value="classic">Classic</option>
-              <option value="glass">Glass</option>
-              <option value="dojo">Dojo</option>
-              <option value="clay">Clay</option>
-              <option value="cleangirl">Clean Girl</option>
-              <option value="strawberry">Strawberry</option>
-              <option value="matcha">Matcha</option>
-              <option value="golden">Golden</option>
-              <option value="silentpower">Silent Power</option>
-              <option value="everybody">Everybody</option>
-            </select>
-          </div>
-          <button type="submit" class="btn btn-primary btn-block" id="newreel-submit">Publish Reel</button>
-        </form>
-        <div id="newreel-success" class="success hidden">
-          <p>✅ Reel published!</p>
-          <button class="btn btn-primary btn-block" onclick="app.openTab('reels')">View Feed</button>
-        </div>
+        <div id="newreel-root"></div>
       </section>
 
       <!-- Chat -->
       <section id="view-chat" class="view hidden" data-tab="chat">
+        <div class="chat-intro">
+          <h2>Chat with Lumi</h2>
+          <p class="muted">Your editor is on the other side of this. Ask anything about your reel.</p>
+        </div>
+        <div id="chat-notice" class="notice-banner hidden"></div>
         <div class="chat-split">
-          <!-- Conversation list -->
           <aside class="chat-list" id="chat-list">
             <header class="chat-list-header">
-              <h2>Messages</h2>
-              <input type="text" id="chat-search" placeholder="Search conversations" />
+              <input type="text" id="chat-search" placeholder="Search conversations" aria-label="Search conversations" />
             </header>
-            <ul class="chat-list-items" id="chat-list-items">
-              <!-- populated -->
-            </ul>
-            <div id="chat-list-empty" class="empty hidden">
-              <p>No conversations yet.</p>
-            </div>
+            <ul class="chat-list-items" id="chat-list-items"></ul>
+            <div id="chat-list-empty" class="empty hidden"><p>No conversations yet.</p></div>
           </aside>
 
-          <!-- Message thread -->
           <article class="chat-thread" id="chat-thread">
             <header class="chat-thread-header hidden" id="chat-thread-header">
-              <button class="icon-btn back" id="chat-back">‹</button>
-              <div class="thread-title">
-                <span id="chat-thread-name">Select a conversation</span>
-              </div>
+              <button class="icon-btn back" id="chat-back" aria-label="Back">‹</button>
+              <div class="thread-title"><span id="chat-thread-name">Select a conversation</span></div>
+              <button class="icon-btn" id="chat-team-btn" aria-label="Ask the Lumi team">✉</button>
             </header>
             <div class="chat-messages" id="chat-messages">
               <div class="empty">Select a conversation to start messaging.</div>
             </div>
             <form class="chat-composer" id="chat-composer" novalidate>
-              <input type="text" name="text" id="chat-input" placeholder="Send a message…" disabled />
-              <button type="button" class="icon-btn" id="chat-video-btn" title="Send video comment" disabled>🎥</button>
+              <input type="file" id="chat-photo-input" accept="image/*" class="sr-only" />
+              <input type="file" id="chat-clip-input" accept="video/*" class="sr-only" />
+              <button type="button" class="icon-btn" id="chat-photo-btn" title="Attach photo" disabled>▣</button>
+              <input type="text" name="text" id="chat-input" placeholder="Ask Lumi anything…" disabled />
+              <button type="button" class="icon-btn" id="chat-clip-btn" title="Attach clip" disabled>🎞</button>
               <button type="submit" class="icon-btn send" id="chat-send" title="Send" disabled>➤</button>
             </form>
           </article>
         </div>
-        <div id="chat-empty" class="empty hidden">
-          <p>No conversations yet.</p>
-        </div>
+        <div id="chat-empty" class="empty hidden"><p>No conversations yet.</p></div>
       </section>
 
       <!-- Pay -->
       <section id="view-pay" class="view hidden" data-tab="pay">
-        <header class="view-header">
-          <h2>Pay</h2>
-          <p class="muted">Upgrade your edit tools.</p>
-        </header>
-        <form id="pay-form" novalidate>
-          <div class="price-card">
-            <span class="price">$4.99</span>
-            <span class="price-label">/ month — Lumi Pro</span>
-          </div>
-          <ul class="feature-list">
-            <li>✓ No watermark on exports</li>
-            <li>✓ All 10 style themes</li>
-            <li>✓ 4K video export</li>
-            <li>✓ Priority support</li>
-          </ul>
-          <div class="field">
-            <label>Card number</label>
-            <input type="text" name="card" placeholder="•••• •••• •••• ••••" maxlength="19" required />
-          </div>
-          <div class="fields-row">
-            <div class="field">
-              <label>Expiry</label>
-              <input type="text" name="expiry" placeholder="MM/YY" required />
-            </div>
-            <div class="field">
-              <label>CVC</label>
-              <input type="text" name="cvc" placeholder="•••" maxlength="3" required />
-            </div>
-          </div>
-          <div class="field">
-            <label>Name on card</label>
-            <input type="text" name="name" placeholder="Jane Doe" required />
-          </div>
-          <button type="submit" class="btn btn-primary btn-block" id="pay-submit">Pay $4.99</button>
-        </form>
-        <div id="pay-success" class="success hidden">
-          <p>✅ Payment successful — welcome to Lumi Pro!</p>
-          <button class="btn btn-primary btn-block" onclick="app.openTab('reels')">Explore Reels</button>
-        </div>
+        <div id="pay-root"></div>
       </section>
-
     </main>
 
     <!-- Sticky bottom tab nav -->
     <nav class="tab-nav" id="tab-nav">
       <a class="tab active" href="#" data-tab="reels" aria-current="page">
-        <span class="tab-icon">📼</span><span class="tab-label">Reels</span>
+        <span class="tab-icon">◉</span><span class="tab-label">Reels</span>
       </a>
       <a class="tab" href="#" data-tab="styles">
-        <span class="tab-icon">🎨</span><span class="tab-label">Styles</span>
+        <span class="tab-icon">◇</span><span class="tab-label">Styles</span>
       </a>
       <a class="tab" href="#" data-tab="newreel">
-        <span class="tab-icon">➕</span><span class="tab-label">New Reel</span>
+        <span class="tab-icon">＋</span><span class="tab-label">New reel</span>
       </a>
       <a class="tab" href="#" data-tab="chat">
-        <span class="tab-icon">💬</span><span class="tab-label">Chat</span>
+        <span class="tab-icon">▤</span><span class="tab-label">Chat</span>
       </a>
       <a class="tab" href="#" data-tab="pay">
-        <span class="tab-icon">💳</span><span class="tab-label">Pay</span>
+        <span class="tab-icon">◈</span><span class="tab-label">Pay</span>
       </a>
     </nav>
 
-    <!-- Toast -->
-    <div id="toast" class="toast hidden"></div>
+    <!-- Toast + global overlay root -->
+    <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+    <div id="overlay-root"></div>
   </div>
 
   <script>
-    // Service worker registration
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('/app/sw.js').catch(() => {});
     }
   </script>
+  <script src="/app/editor.js"></script>
   <script src="/app/app.js"></script>
 </body>
 </html>
