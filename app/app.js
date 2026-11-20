@@ -23,6 +23,7 @@ const THEME_KEY = 'lumi_theme';           // look theme (legacy key, preserved)
 const APPEARANCE_KEY = 'lumi_appearance'; // light | dark | auto
 const DRAFT_KEY = 'lumi_draft';
 const COVER_KEY = 'lumi_covers';
+const EDIT_KEY = 'lumi_edits_v1';
 
 /* ---------- Default catalog (used when API catalog is missing) ---------- */
 const LOOKS = [
@@ -167,8 +168,10 @@ const app = {
     stylesSegment: 'templates',
     likePending: new Set(),
     covers: {},
+    edits: {},                  // reelId -> local edit model (timeline, motion, captions)
     localSources: {},           // reelId -> object URL (for local preview/export)
     editorCtrl: null,           // camera controller
+    editPreview: null,          // canvas preview controller
     newReel: null,
   },
 
@@ -197,6 +200,11 @@ const app = {
       const raw = localStorage.getItem(COVER_KEY);
       if (raw) this.state.covers = JSON.parse(raw) || {};
     } catch (e) { this.state.covers = {}; }
+
+    try {
+      const raw = localStorage.getItem(EDIT_KEY);
+      if (raw) this.state.edits = JSON.parse(raw) || {};
+    } catch (e) { this.state.edits = {}; }
 
     if (token) {
       this.state.token = token;
@@ -564,6 +572,38 @@ const app = {
     return true;
   },
 
+  /* ---------- Local edit model (timeline, motion, audio, captions) ---------- */
+  editModel() {
+    return (typeof window !== 'undefined' && window.LumiEditModel) ? window.LumiEditModel : null;
+  },
+
+  getEdit(reel) {
+    const M = this.editModel();
+    const id = String(reel?.id || 'draft');
+    const saved = this.state.edits[id];
+    if (saved && Array.isArray(saved.clips) && saved.clips.length) return saved;
+    const fresh = M ? M.defaultEdit(reel) : { clips: [], captions: [], look: reel?.look || 'classic', format: reel?.format || 'vertical' };
+    this.saveEdit(id, fresh);
+    return fresh;
+  },
+
+  saveEdit(id, edit) {
+    const key = String(id || 'draft');
+    edit.version = 1;
+    edit.updated = new Date().toISOString();
+    this.state.edits[key] = edit;
+    try { localStorage.setItem(EDIT_KEY, JSON.stringify(this.state.edits)); } catch (e) { /* storage is best effort */ }
+    return edit;
+  },
+
+  editExportClips(edit) {
+    const M = this.editModel();
+    const norm = M ? M.normalizeTimeline(edit.clips, {
+      look: edit.look, format: edit.format, musicMode: edit.musicMode
+    }) : { clips: edit.clips || [], total: 30 };
+    return { clips: norm.clips, total: norm.total };
+  },
+
   /* =====================================================================
      5. APPEARANCE / MENU / OVERLAY SHEETS
      ===================================================================== */
@@ -637,6 +677,10 @@ const app = {
   closeSheet() {
     const root = document.getElementById('overlay-root');
     if (root) root.innerHTML = '';
+    if (this.state.editPreview && typeof this.state.editPreview.destroy === 'function') {
+      try { this.state.editPreview.destroy(); } catch (e) { /* noop */ }
+      this.state.editPreview = null;
+    }
     if (this.state.editorCtrl && typeof this.state.editorCtrl.close === 'function' && !this.state.keepCamera) {
       try { this.state.editorCtrl.close(); } catch (e) { /* noop */ }
       this.state.editorCtrl = null;
@@ -2362,9 +2406,134 @@ const app = {
   /* =====================================================================
      10. EDITOR / EXPORT SHEET
      ===================================================================== */
+  /* ---------- Edit studio render helpers ---------- */
+  motionPresetName(motion, duration, M) {
+    if (!M) return 'none';
+    const keys = (motion && Array.isArray(motion.keys) ? motion.keys : []);
+    if (!keys.length) return 'none';
+    const sig = (list) => JSON.stringify(list.map((k) => [
+      Number(k.t).toFixed(2), Number(k.x).toFixed(3), Number(k.y).toFixed(3),
+      Number(k.zoom).toFixed(3), Number(k.rotate).toFixed(3),
+    ]));
+    const target = sig(keys);
+    for (const name of Object.keys(M.MOTION_PRESETS || {})) {
+      if (sig(M.normalizeMotion(name, Number(duration) || 5).keys) === target) return name;
+    }
+    return 'custom';
+  },
+
+  editClipBlockHtml(clip, i, active, total) {
+    const M = this.editModel();
+    const t = Math.max(0.05, Number(total) || 1);
+    const start = Math.max(0, Number(clip?.timelineStart) || 0);
+    const dur = Math.max(0.05, Number(clip?.duration) || 0);
+    const left = Math.min(99, start / t * 100);
+    const width = Math.max(1.2, Math.min(100 - left, dur / t * 100));
+    const tr = clip?.transition || {};
+    const hasTr = tr.type && tr.type !== 'none' && Number(tr.duration) > 0;
+    return `<button type="button" class="edit-block ${active ? 'active' : ''}" data-clip-index="${i}" style="left:${left.toFixed(2)}%;width:${width.toFixed(2)}%" title="${this.esc(clip?.name || ('Clip ' + (i + 1)))}">
+      <span class="eb-label">${this.esc(clip?.name || ('Clip ' + (i + 1)))}</span>
+      <span class="eb-meta">${this.fmtTime(dur)}${hasTr ? ' · ' + this.esc(tr.type) : ''}</span>
+    </button>`;
+  },
+
+  editPanelHtml(clip, i) {
+    const M = this.editModel();
+    const c = clip || {};
+    const tr = c.transition || { type: 'none', duration: 0 };
+    const a = c.audio || { volume: 1, fadeIn: 0, fadeOut: 0, muted: false };
+    const dur = Number(c.duration) || 5;
+    const presets = M ? Object.keys(M.MOTION_PRESETS || {}) : ['none'];
+    const activePreset = this.motionPresetName(c.motion, dur, M);
+    const presetOpts = presets.map((p) => `<option value="${this.esc(p)}" ${p === activePreset ? 'selected' : ''}>${this.esc(p === 'none' ? 'None' : p)}</option>`).join('')
+      + (activePreset === 'custom' ? '<option value="custom" selected>custom keyframes</option>' : '');
+    const transitions = (M ? M.TRANSITIONS : ['none', 'fade', 'wipe', 'slide', 'zoom'])
+      .map((p) => `<option value="${this.esc(p)}" ${p === tr.type ? 'selected' : ''}>${this.esc(p)}</option>`).join('');
+    const positions = (M ? M.CAP_POSITIONS : ['top', 'middle', 'bottom']);
+    const sizes = (M ? M.CAP_SIZES : ['S', 'M', 'L']);
+    const keys = (c.motion && Array.isArray(c.motion.keys) ? c.motion.keys : []);
+    return `
+      <div class="edit-panel-head">
+        <div><strong>Clip ${i + 1}</strong><span class="tiny muted"> ${this.esc(c.name || '')}</span></div>
+        <div class="edit-panel-actions">
+          <button type="button" data-clip-action="left" title="Move earlier">←</button>
+          <button type="button" data-clip-action="right" title="Move later">→</button>
+          <button type="button" data-clip-action="duplicate">Duplicate</button>
+          <button type="button" data-clip-action="remove">Remove</button>
+        </div>
+      </div>
+      <div class="fields-row">
+        <div class="field"><label>In point</label><input type="number" step="0.01" min="0" data-clip-field="inPoint" value="${this.esc(Number(c.inPoint).toFixed(2))}" /></div>
+        <div class="field"><label>Duration</label><input type="number" step="0.01" min="0.05" data-clip-field="duration" value="${this.esc(dur.toFixed(2))}" /></div>
+        <div class="field"><label>Starts at</label><input type="number" step="0.01" min="0" data-clip-field="timelineStart" value="${this.esc(Number(c.timelineStart).toFixed(2))}" /></div>
+      </div>
+      <div class="section-title small">Transition in</div>
+      <div class="fields-row">
+        <div class="field"><label>Type</label><select data-clip-field="transition.type">${transitions}</select></div>
+        <div class="field"><label>Length (s)</label><input type="number" step="0.05" min="0" max="5" data-clip-field="transition.duration" value="${this.esc(Number(tr.duration || 0).toFixed(2))}" /></div>
+      </div>
+      <div class="section-title small">Motion keyframes</div>
+      <div class="field"><label>Preset</label><select data-clip-motion="preset">${presetOpts}</select></div>
+      <div class="keyframe-list">
+        ${keys.length ? keys.map((k, ki) => `
+          <div class="keyframe-row" data-key-index="${ki}">
+            <input type="number" step="0.05" min="0" data-key-field="t" value="${this.esc(Number(k.t).toFixed(2))}" title="Time in clip" />
+            <input type="number" step="0.05" min="-1" max="1" data-key-field="x" value="${this.esc(Number(k.x).toFixed(2))}" title="Pan X" />
+            <input type="number" step="0.05" min="-1" max="1" data-key-field="y" value="${this.esc(Number(k.y).toFixed(2))}" title="Pan Y" />
+            <input type="number" step="0.05" min="1" max="3" data-key-field="zoom" value="${this.esc(Number(k.zoom).toFixed(2))}" title="Zoom" />
+            <input type="number" step="0.5" min="-45" max="45" data-key-field="rotate" value="${this.esc(Number(k.rotate).toFixed(1))}" title="Rotate" />
+            <button type="button" data-clip-action="remove-key" title="Remove keyframe">✕</button>
+          </div>`).join('') : '<p class="tiny muted">No keyframes. Choose a preset or add one at the playhead.</p>'}
+      </div>
+      <div class="btn-row compact">
+        <button type="button" class="btn btn-ghost" data-clip-action="add-key">Add keyframe at playhead</button>
+        <button type="button" class="btn btn-ghost" data-clip-action="clear-motion">Clear motion</button>
+      </div>
+      <div class="section-title small">Audio</div>
+      <div class="fields-row">
+        <div class="field"><label>Volume</label><input type="number" step="0.05" min="0" max="2" data-audio-field="volume" value="${this.esc(Number(a.volume).toFixed(2))}" /></div>
+        <div class="field"><label>Fade in</label><input type="number" step="0.05" min="0" data-audio-field="fadeIn" value="${this.esc(Number(a.fadeIn || 0).toFixed(2))}" /></div>
+        <div class="field"><label>Fade out</label><input type="number" step="0.05" min="0" data-audio-field="fadeOut" value="${this.esc(Number(a.fadeOut || 0).toFixed(2))}" /></div>
+        <div class="field"><label>Mute</label><label class="switch"><input type="checkbox" data-audio-field="muted" ${a.muted ? 'checked' : ''} /><i></i></label></div>
+      </div>
+      <p class="tiny muted">Pan / zoom / rotation are applied by the local renderer. Audio gain and fades are audible in exported videos; the preview is muted.</p>`;
+  },
+
+  editCaptionRowHtml(cap, i) {
+    const M = this.editModel();
+    const c = cap || {};
+    const positions = (M ? M.CAP_POSITIONS : ['top', 'middle', 'bottom']);
+    const sizes = (M ? M.CAP_SIZES : ['S', 'M', 'L']);
+    const opts = (list, cur) => list.map((v) => `<option value="${this.esc(v)}" ${String(cur) === String(v) ? 'selected' : ''}>${this.esc(v)}</option>`).join('');
+    return `<div class="caption-row" data-cap-index="${i}">
+      <div class="fields-row">
+        <div class="field"><label>At (s)</label><input type="number" step="0.1" min="0" data-cap-field="t" value="${this.esc(Number(c.t).toFixed(2))}" /></div>
+        <div class="field"><label>For (s)</label><input type="number" step="0.1" min="0.05" data-cap-field="duration" value="${this.esc(Number(c.duration || 3).toFixed(2))}" /></div>
+        <div class="field"><label>Position</label><select data-cap-field="position">${opts(positions, c.position || 'bottom')}</select></div>
+        <div class="field"><label>Size</label><select data-cap-field="size">${opts(sizes, c.size || 'M')}</select></div>
+      </div>
+      <div class="fields-row">
+        <div class="field"><label>Color (blank = look default)</label><input type="text" data-cap-field="color" placeholder="#ffffff or blank" value="${this.esc(c.color || '')}" /></div>
+        <div class="field"><label>Weight</label><select data-cap-field="weight">${opts([400, 500, 600, 700, 800, 900], c.weight || 800)}</select></div>
+      </div>
+      <div class="caption-text-row">
+        <input type="text" data-cap-field="text" value="${this.esc(c.text || '')}" placeholder="Caption text" />
+        <button type="button" data-cap-action="remove" title="Remove caption">✕</button>
+      </div>
+    </div>`;
+  },
+
   openEditor(reelId) {
     const reel = this.state.reels.find((r) => String(r.id) === String(reelId));
     if (!reel) return;
+    const M = this.editModel();
+    const edit = this.getEdit(reel);
+    edit.captions = Array.isArray(edit.captions) ? edit.captions : [];
+    edit.hook = edit.hook || { text: '', t: 0, duration: 2.5 };
+    edit.cta = edit.cta || { text: 'Follow for more', t: 0, duration: 2 };
+    if (M) edit.clips = M.normalizeTimeline(edit.clips, {
+      look: edit.look, format: edit.format, musicMode: edit.musicMode,
+    }).clips;
     const src = this.reelVideoUrl(reel);
     const canExport = this.editorCan('exportVideo');
     const hasPlan = !!(reel.plan || (Array.isArray(reel.storyboard) && reel.storyboard.length));
@@ -2372,31 +2541,63 @@ const app = {
     const plan = reel.plan || (Array.isArray(reel.storyboard) && reel.storyboard.length
       ? { scenes: reel.storyboard, planner: 'on-device AI planner', method: 'saved storyboard' }
       : null);
-    const looks = this.catalogList('templates').map((l) => `<option value="${this.esc(l.id)}" ${String(reel.look || reel.style || this.state.draft.look) === String(l.id) ? 'selected' : ''}>${this.esc(l.name)}</option>`).join('');
+    const looks = this.catalogList('templates').map((l) => `<option value="${this.esc(l.id)}" ${String(edit.look || l.id) === String(l.id) ? 'selected' : ''}>${this.esc(l.name)}</option>`).join('');
+    const total = M ? M.normalizeTimeline(edit.clips, { look: edit.look, format: edit.format }).total : 30;
+    const captionText = M && typeof M.serializeCaptions === 'function'
+      ? M.serializeCaptions(edit.captions) : this.editorCaptionText(reel, plan);
 
     const body = `
       ${hasPlan ? `<div class="plan-banner ${approved ? 'ok' : ''}">
         <div class="spread"><strong>On-device plan v${this.esc(reel.planVersion || 1)}</strong><span>${this.esc(reel.stage || 'storyboard')}</span></div>
         <p>${approved ? 'Approved — local export is unlocked.' : 'Export is locked. Approve the storyboard in Review before rendering.'}</p>
       </div>` : ''}
-      ${src ? `<video id="edit-video" class="review-video" src="${this.esc(src)}" muted playsinline controls preload="metadata"></video>` : '<p class="muted">No playable source in this deployment. Upload a video to enable export.</p>'}
-      ${!canExport ? '<p class="hint">Local export is not supported by this browser engine. You can still save a version note.</p>' : ''}
-      <div class="spread" style="margin-top:10px"><span class="timecode" id="edit-time">0:00</span><span class="tiny muted">Set start & end</span></div>
-      <div class="range-row">
-        <div><label>Start</label><input type="range" id="edit-start" min="0" max="60" value="${this.esc(reel.trimStart || 0)}" /></div>
-        <div><label>End</label><input type="range" id="edit-end" min="0" max="60" value="60" /></div>
-      </div>
-      <div class="section-title">Format & look</div>
-      <div class="field"><label>Format</label><select id="edit-format"><option value="vertical">Vertical 9:16</option><option value="horizontal">Horizontal</option></select></div>
-      <div class="field"><label>Look</label><select id="edit-look">${looks}</select></div>
-      <div class="section-title">Captions & copy</div>
-      <div class="field"><label>Captions (one per line: 0:03 text)</label><textarea id="edit-captions" placeholder="0:00 Hook line\n0:03 Second line">${this.esc(this.editorCaptionText(reel, plan))}</textarea></div>
-      <div class="fields-row">
-        <div class="field"><label>Hook text</label><input id="edit-hook" type="text" value="${this.esc(reel.hookText || reel.title || '')}" /></div>
-      </div>
-      <div class="field"><label>CTA text</label><input id="edit-cta" type="text" value="${this.esc(reel.ctaText || 'Follow for more')}" /></div>
-      <div class="field"><label>Music mode</label><select id="edit-music"><option value="source">Keep source audio</option><option value="none">No music</option></select></div>
-      <div class="progress-wrap hidden" id="edit-progress"><div class="progress-bar"><i id="edit-progress-fill"></i></div><div class="progress-label" id="edit-progress-label">Exporting…</div></div>`;
+      <div class="edit-studio">
+        <div class="edit-preview-wrap">
+          <canvas id="edit-canvas" class="edit-canvas" aria-label="Edit preview"></canvas>
+          <video id="edit-fallback-video" class="review-video hidden" src="${this.esc(src)}" muted playsinline controls preload="metadata"></video>
+          <div class="edit-preview-bar">
+            <button type="button" class="icon-btn" id="edit-play" aria-label="Play or pause preview">▶</button>
+            <input type="range" id="edit-seek" min="0" max="${this.esc(String(Math.max(0.05, total).toFixed(2)))}" step="0.01" value="0" aria-label="Seek preview" />
+            <span class="timecode" id="edit-time">0:00 / ${this.fmtTime(total)}</span>
+          </div>
+          <p class="hint" id="edit-preview-hint">Preview is muted and drawn by the same local renderer used for export.</p>
+        </div>
+        ${!canExport ? '<p class="hint">Local export is not supported by this browser engine. You can still save a version note.</p>' : ''}
+
+        <div class="section-title">Timeline <span class="tiny muted" id="edit-total">${this.fmtTime(total)}</span></div>
+        <div class="edit-timeline" id="edit-timeline">
+          ${edit.clips.map((c, i) => this.editClipBlockHtml(c, i, i === 0, total)).join('') || '<p class="tiny muted">No clips yet. Add one from the source.</p>'}
+        </div>
+        <div class="btn-row compact" style="margin-top:8px">
+          <button type="button" class="btn btn-ghost" id="edit-reflow">Reflow timeline</button>
+          <button type="button" class="btn btn-ghost" id="edit-add-clip">Add clip from source</button>
+          <button type="button" class="btn btn-ghost" id="edit-reset">Rebuild edit</button>
+        </div>
+        <div class="edit-panel" id="edit-clip-panel">${edit.clips.length ? this.editPanelHtml(edit.clips[0], 0) : '<p class="tiny muted">Select a clip to edit it.</p>'}</div>
+
+        <div class="section-title">Captions <span class="tiny muted" id="edit-captions-count">${edit.captions.length} lines</span></div>
+        <div class="edit-captions" id="edit-captions-list">
+          ${edit.captions.map((c, i) => this.editCaptionRowHtml(c, i)).join('') || '<p class="tiny muted">No timed captions. Add one at the playhead.</p>'}
+        </div>
+        <div class="btn-row compact" style="margin-top:8px"><button type="button" class="btn btn-ghost" id="edit-add-cap">Add caption at playhead</button></div>
+        <details class="edit-advanced">
+          <summary>Advanced caption text</summary>
+          <p class="tiny muted">One per line: <code>0:03|bottom|M|#ffffff|800|Your line</code>. Blank color uses the look default.</p>
+          <textarea id="edit-cap-text" rows="5" placeholder="0:00|bottom|L||800|Hook line">${this.esc(captionText)}</textarea>
+          <button type="button" class="btn btn-secondary" id="edit-cap-apply">Apply text</button>
+        </details>
+
+        <div class="section-title">Format & copy</div>
+        <div class="fields-row">
+          <div class="field"><label>Format</label><select id="edit-format"><option value="vertical" ${edit.format === 'vertical' ? 'selected' : ''}>Vertical 9:16</option><option value="horizontal" ${edit.format === 'horizontal' ? 'selected' : ''}>Horizontal</option></select></div>
+          <div class="field"><label>Look</label><select id="edit-look">${looks}</select></div>
+        </div>
+        <div class="field"><label>Hook text</label><input id="edit-hook" type="text" value="${this.esc(edit.hook.text || reel.title || '')}" /></div>
+        <div class="field"><label>CTA text</label><input id="edit-cta" type="text" value="${this.esc(edit.cta.text || 'Follow for more')}" /></div>
+        <div class="field"><label>Audio</label><select id="edit-music"><option value="source" ${edit.musicMode !== 'none' ? 'selected' : ''}>Keep clip audio</option><option value="none" ${edit.musicMode === 'none' ? 'selected' : ''}>Silent export</option></select></div>
+        <p class="tiny muted" id="edit-save-state">Edits are saved on this device only.</p>
+        <div class="progress-wrap hidden" id="edit-progress"><div class="progress-bar"><i id="edit-progress-fill"></i></div><div class="progress-label" id="edit-progress-label">Exporting…</div></div>
+      </div>`;
 
     const foot = `
       <div class="btn-row">
@@ -2406,90 +2607,425 @@ const app = {
       </div>`;
 
     this.showSheet(`Edit · ${reel.title || 'Reel'}`, body, foot, {
-      onMount: (overlay) => this.bindEditor(overlay, reel, src, plan, approved),
+      onMount: (overlay) => this.bindEditor(overlay, reel, edit, src, plan, approved),
     });
+    this.saveEdit(reel.id, edit);
   },
 
-  bindEditor(overlay, reel, src, plan, approved) {
-    const video = overlay.querySelector('#edit-video');
-    const start = overlay.querySelector('#edit-start');
-    const end = overlay.querySelector('#edit-end');
+  bindEditor(overlay, reel, edit, src, plan, approved) {
+    const M = this.editModel();
+    const E = this.editor();
+    const $ = (sel) => overlay.querySelector(sel);
+    let selected = 0;
     let exportController = null;
-    let duration = Number(reel.duration) || 0;
-    const setDur = (d) => {
-      if (!isFinite(d) || d <= 0) return;
-      duration = d;
-      if (start) { start.max = Math.floor(d); start.value = Math.min(Number(reel.trimStart || 0), Math.floor(d)); }
-      if (end) { end.max = Math.floor(d); end.value = Math.floor(d); }
-    };
-    if (video) {
-      video.addEventListener('loadedmetadata', () => setDur(video.duration));
-      video.addEventListener('timeupdate', () => {
-        const t = overlay.querySelector('#edit-time');
-        if (t) t.textContent = this.fmtTime(video.currentTime);
-      });
-    }
+    let preview = null;
+    let playing = false;
 
+    const totalOf = () => {
+      if (M) {
+        return M.normalizeTimeline(edit.clips, {
+          look: edit.look, format: edit.format, musicMode: edit.musicMode,
+        }).total;
+      }
+      return edit.clips.reduce((sum, c) => Math.max(sum, (Number(c.timelineStart) || 0) + (Number(c.duration) || 0)), 0.05);
+    };
+    const playhead = () => (preview && typeof preview.currentTime === 'function'
+      ? preview.currentTime() : (Number($('#edit-seek')?.value) || 0));
+    const persist = () => {
+      this.saveEdit(reel.id, edit);
+      const s = $('#edit-save-state');
+      if (s) s.textContent = 'Saved on this device · ' + new Date().toLocaleTimeString();
+    };
     const setProgress = (show, pct, label) => {
-      const w = overlay.querySelector('#edit-progress');
-      const f = overlay.querySelector('#edit-progress-fill');
-      const l = overlay.querySelector('#edit-progress-label');
+      const w = $('#edit-progress');
+      const f = $('#edit-progress-fill');
+      const l = $('#edit-progress-label');
       if (w) w.classList.toggle('hidden', !show);
       if (f) f.style.width = `${Math.max(0, Math.min(100, pct))}%`;
       if (l && label) l.textContent = label;
     };
+    const syncTime = (t) => {
+      const time = Math.max(0, Number(t) || 0);
+      const el = $('#edit-time');
+      if (el) el.textContent = this.fmtTime(time) + ' / ' + this.fmtTime(totalOf());
+      const seek = $('#edit-seek');
+      if (seek && document.activeElement !== seek) seek.value = String(Math.min(time, Number(seek.max) || time));
+    };
 
-    overlay.querySelector('#edit-cancel')?.addEventListener('click', () => {
+    const renderTimeline = () => {
+      const el = $('#edit-timeline');
+      if (!el) return;
+      const total = totalOf();
+      el.innerHTML = edit.clips.map((c, i) => this.editClipBlockHtml(c, i, selected === i, total)).join('')
+        || '<p class="tiny muted">No clips yet. Add one from the source.</p>';
+      const label = $('#edit-total');
+      if (label) label.textContent = this.fmtTime(total);
+    };
+    const renderPanel = () => {
+      const el = $('#edit-clip-panel');
+      if (!el) return;
+      el.innerHTML = edit.clips[selected] ? this.editPanelHtml(edit.clips[selected], selected)
+        : '<p class="tiny muted">Select a clip to edit it.</p>';
+    };
+    const renderCaptions = () => {
+      const el = $('#edit-captions-list');
+      if (!el) return;
+      el.innerHTML = edit.captions.map((c, i) => this.editCaptionRowHtml(c, i)).join('')
+        || '<p class="tiny muted">No timed captions. Add one at the playhead.</p>';
+      const count = $('#edit-captions-count');
+      if (count) count.textContent = edit.captions.length + ' lines';
+    };
+    const refreshChrome = () => {
+      const seek = $('#edit-seek');
+      if (seek) seek.max = String(Math.max(0.05, totalOf()));
+      renderTimeline();
+      renderPanel();
+      syncTime(playhead());
+    };
+
+    /* Muted, seek-safe preview. Export uses the same renderer with real audio. */
+    const initPreview = () => {
+      if (preview) {
+        try { preview.destroy(); } catch (e) { /* noop */ }
+        preview = null;
+        this.state.editPreview = null;
+      }
+      playing = false;
+      const play = $('#edit-play');
+      if (play) play.textContent = '▶';
+      const canvas = $('#edit-canvas');
+      const hint = $('#edit-preview-hint');
+      const fallback = $('#edit-fallback-video');
+      if (!E || typeof E.createPreview !== 'function' || !canvas || !edit.clips.length) {
+        if (canvas) canvas.classList.add('hidden');
+        if (fallback) fallback.classList.remove('hidden');
+        if (hint) hint.textContent = 'Preview is unavailable here; local export may still work.';
+        return Promise.resolve();
+      }
+      return E.createPreview({
+        canvas,
+        edit,
+        plan,
+        onTime: (t) => {
+          syncTime(t);
+          if (playing && t >= totalOf() - 0.02) {
+            playing = false;
+            const b = $('#edit-play');
+            if (b) b.textContent = '▶';
+          }
+        },
+      }).then((p) => {
+        preview = p;
+        this.state.editPreview = p;
+        const seek = $('#edit-seek');
+        if (seek) seek.max = String(Math.max(0.05, p.duration()));
+        canvas.classList.remove('hidden');
+        if (fallback) fallback.classList.add('hidden');
+        if (hint) hint.textContent = 'Preview is muted and drawn by the same local renderer used for export.';
+      }).catch((err) => {
+        canvas.classList.add('hidden');
+        if (fallback) fallback.classList.remove('hidden');
+        if (hint) hint.textContent = 'Preview unavailable: ' + ((err && err.message) || 'source cannot be drawn');
+      });
+    };
+
+    $('#edit-play')?.addEventListener('click', () => {
+      const btn = $('#edit-play');
+      if (preview) {
+        if (preview.currentTime() >= totalOf() - 0.02) preview.seek(0).catch(() => {});
+        if (playing) { preview.pause(); playing = false; }
+        else { preview.play(); playing = true; }
+      } else {
+        const fb = $('#edit-fallback-video');
+        if (fb) {
+          if (fb.paused) { const p = fb.play(); if (p && p.catch) p.catch(() => {}); playing = true; }
+          else { fb.pause(); playing = false; }
+        }
+      }
+      if (btn) btn.textContent = playing ? '❚❚' : '▶';
+    });
+
+    $('#edit-seek')?.addEventListener('input', (e) => {
+      const v = Number(e.target.value) || 0;
+      syncTime(v);
+      if (playing) {
+        playing = false;
+        if (preview) preview.pause();
+        const b = $('#edit-play');
+        if (b) b.textContent = '▶';
+      }
+      if (preview) preview.seek(v).catch(() => {});
+      else {
+        const fb = $('#edit-fallback-video');
+        if (fb && isFinite(fb.duration)) { try { fb.currentTime = v; } catch (err) { /* noop */ } }
+      }
+    });
+
+    $('#edit-timeline')?.addEventListener('click', (e) => {
+      const block = e.target.closest('[data-clip-index]');
+      if (!block) return;
+      selected = Number(block.dataset.clipIndex) || 0;
+      renderTimeline();
+      renderPanel();
+      const c = edit.clips[selected];
+      if (c && preview) preview.seek(Math.min((Number(c.timelineStart) || 0) + 0.01, totalOf())).catch(() => {});
+    });
+
+    $('#edit-reflow')?.addEventListener('click', () => {
+      if (M) M.reflow(edit.clips);
+      else {
+        let cursor = 0;
+        edit.clips.forEach((c) => { c.timelineStart = cursor; cursor += Math.max(0.05, Number(c.duration) || 0); });
+      }
+      refreshChrome();
+      persist();
+      initPreview();
+      this.toast('Timeline reflowed to remove gaps.');
+    });
+
+    $('#edit-add-clip')?.addEventListener('click', () => {
+      if (!src) { this.toast('No source clip is available.'); return; }
+      const dur = edit.clips[selected] ? (Number(edit.clips[selected].duration) || 3) : 3;
+      edit.clips.push({
+        id: 'c_' + Date.now(),
+        url: src,
+        name: 'Clip ' + (edit.clips.length + 1),
+        inPoint: 0,
+        duration: dur,
+        sourceDuration: 0,
+        timelineStart: 0,
+        transition: { type: 'fade', duration: 0.3 },
+        motion: M ? M.normalizeMotion('none', dur) : { keys: [] },
+        audio: { volume: 1, fadeIn: 0, fadeOut: 0, muted: false },
+        look: edit.look || 'classic',
+      });
+      if (M) M.reflow(edit.clips);
+      selected = edit.clips.length - 1;
+      refreshChrome();
+      persist();
+      initPreview();
+    });
+
+    $('#edit-reset')?.addEventListener('click', () => {
+      if (M) Object.assign(edit, M.defaultEdit(reel));
+      else { edit.clips = []; edit.captions = []; }
+      edit.captions = Array.isArray(edit.captions) ? edit.captions : [];
+      selected = 0;
+      const hook = $('#edit-hook');
+      if (hook) hook.value = edit.hook?.text || '';
+      const cta = $('#edit-cta');
+      if (cta) cta.value = edit.cta?.text || '';
+      const capText = $('#edit-cap-text');
+      if (capText && M) capText.value = M.serializeCaptions(edit.captions);
+      refreshChrome();
+      renderCaptions();
+      persist();
+      initPreview();
+      this.toast('Edit rebuilt from the source.');
+    });
+
+    $('#edit-clip-panel')?.addEventListener('change', (e) => {
+      const el = e.target;
+      const clip = edit.clips[selected];
+      if (!clip) return;
+      const field = el.dataset.clipField;
+      if (field === 'transition.type') {
+        clip.transition = clip.transition || {};
+        clip.transition.type = el.value;
+        refreshChrome(); persist(); return;
+      }
+      if (field === 'transition.duration') {
+        clip.transition = clip.transition || {};
+        clip.transition.duration = Math.max(0, Number(el.value) || 0);
+        refreshChrome(); persist(); return;
+      }
+      if (el.dataset.clipMotion === 'preset') {
+        if (el.value !== 'custom' && M) clip.motion = M.normalizeMotion(el.value, Number(clip.duration) || 5);
+        renderPanel(); persist(); initPreview(); return;
+      }
+      const af = el.dataset.audioField;
+      if (af) {
+        clip.audio = clip.audio || {};
+        clip.audio[af] = af === 'muted' ? !!el.checked : Number(el.value);
+        persist(); return;
+      }
+      if (el.dataset.keyField != null) {
+        const ki = Number(el.closest('[data-key-index]')?.dataset.keyIndex);
+        const k = clip.motion && Array.isArray(clip.motion.keys) ? clip.motion.keys[ki] : null;
+        if (k) {
+          k[el.dataset.keyField] = Number(el.value);
+          if (M) clip.motion = M.normalizeMotion(clip.motion, Number(clip.duration) || 5);
+          renderPanel(); persist(); initPreview();
+        }
+        return;
+      }
+      if (field) {
+        const value = Number(el.value);
+        clip[field] = isFinite(value) ? value : 0;
+        if (field === 'duration') {
+          clip.duration = Math.max(0.05, clip.duration);
+          if (M) clip.motion = M.normalizeMotion(clip.motion, clip.duration);
+        }
+        if (field === 'inPoint' || field === 'timelineStart') clip[field] = Math.max(0, clip[field]);
+        refreshChrome(); persist(); initPreview();
+      }
+    });
+
+    $('#edit-clip-panel')?.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-clip-action]');
+      if (!btn) return;
+      const action = btn.dataset.clipAction;
+      const clip = edit.clips[selected];
+      if (!clip && ['duplicate', 'remove', 'add-key', 'remove-key', 'clear-motion'].includes(action)) return;
+      if (action === 'left' && selected > 0) {
+        [edit.clips[selected - 1], edit.clips[selected]] = [edit.clips[selected], edit.clips[selected - 1]];
+        selected--;
+      } else if (action === 'right' && selected < edit.clips.length - 1) {
+        [edit.clips[selected + 1], edit.clips[selected]] = [edit.clips[selected], edit.clips[selected + 1]];
+        selected++;
+      } else if (action === 'duplicate') {
+        const copy = JSON.parse(JSON.stringify(clip));
+        copy.id = 'c_' + Date.now();
+        copy.name = String(clip.name || 'Clip') + ' copy';
+        edit.clips.splice(selected + 1, 0, copy);
+        selected++;
+      } else if (action === 'remove') {
+        if (edit.clips.length <= 1) { this.toast('Keep at least one clip.'); return; }
+        edit.clips.splice(selected, 1);
+        selected = Math.max(0, selected - 1);
+      } else if (action === 'add-key') {
+        const local = Math.max(0, Math.min(Number(clip.duration) || 1,
+          playhead() - (Number(clip.timelineStart) || 0)));
+        clip.motion = clip.motion || { keys: [] };
+        clip.motion.keys = Array.isArray(clip.motion.keys) ? clip.motion.keys : [];
+        clip.motion.keys.push({ t: local, x: 0, y: 0, zoom: 1, rotate: 0 });
+        if (M) clip.motion = M.normalizeMotion(clip.motion, Number(clip.duration) || 5);
+      } else if (action === 'remove-key') {
+        const ki = Number(btn.closest('[data-key-index]')?.dataset.keyIndex);
+        if (clip.motion && Array.isArray(clip.motion.keys) && Number.isFinite(ki)) clip.motion.keys.splice(ki, 1);
+        if (M) clip.motion = M.normalizeMotion(clip.motion || { keys: [] }, Number(clip.duration) || 5);
+      } else if (action === 'clear-motion') {
+        clip.motion = { keys: [] };
+      } else return;
+      if (M) M.reflow(edit.clips);
+      refreshChrome();
+      persist();
+      initPreview();
+    });
+
+    $('#edit-captions-list')?.addEventListener('change', (e) => {
+      const el = e.target;
+      const row = el.closest('[data-cap-index]');
+      if (!row) return;
+      const cap = edit.captions[Number(row.dataset.capIndex)];
+      const f = el.dataset.capField;
+      if (!cap || !f) return;
+      cap[f] = (f === 't' || f === 'duration' || f === 'weight') ? Number(el.value) : el.value;
+      if (typeof cap[f] === 'number' && !isFinite(cap[f])) cap[f] = f === 'duration' ? 3 : 0;
+      persist();
+    });
+
+    $('#edit-captions-list')?.addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-cap-action]');
+      if (!btn || btn.dataset.capAction !== 'remove') return;
+      const row = btn.closest('[data-cap-index]');
+      if (!row) return;
+      edit.captions.splice(Number(row.dataset.capIndex), 1);
+      renderCaptions();
+      persist();
+    });
+
+    $('#edit-add-cap')?.addEventListener('click', () => {
+      const cap = M
+        ? M.normalizeCaption({ t: playhead(), duration: 3, text: 'New caption', position: 'bottom', size: 'M', color: '', weight: 800 }, edit.captions.length)
+        : { id: 'cap_' + Date.now(), t: playhead(), duration: 3, text: 'New caption', position: 'bottom', size: 'M', color: '', weight: 800 };
+      edit.captions.push(cap);
+      edit.captions.sort((a, b) => Number(a.t) - Number(b.t));
+      renderCaptions();
+      const capText = $('#edit-cap-text');
+      if (capText && M) capText.value = M.serializeCaptions(edit.captions);
+      persist();
+    });
+
+    $('#edit-cap-apply')?.addEventListener('click', () => {
+      const ta = $('#edit-cap-text');
+      if (!ta) return;
+      const parsed = M ? M.parseCaptions(ta.value)
+        : this.parseCaptions(ta.value).map((c, i) => ({
+          id: 'cap_' + (i + 1), t: c.t, duration: 3, text: c.text,
+          position: 'bottom', size: 'M', color: '', weight: 800,
+        }));
+      if (!parsed.length) { this.toast('No timed caption lines found.'); return; }
+      edit.captions = parsed;
+      renderCaptions();
+      persist();
+      this.toast('Caption lines applied.');
+    });
+
+    const bindField = (sel, key) => {
+      $(sel)?.addEventListener('change', (e) => {
+        if (key === 'hook.text' || key === 'cta.text') {
+          const [parent, child] = key.split('.');
+          edit[parent] = edit[parent] || {};
+          edit[parent][child] = e.target.value;
+        } else {
+          edit[key] = e.target.value;
+        }
+        persist();
+        if (key === 'format' || key === 'look') initPreview();
+      });
+    };
+    bindField('#edit-format', 'format');
+    bindField('#edit-look', 'look');
+    bindField('#edit-hook', 'hook.text');
+    bindField('#edit-cta', 'cta.text');
+    bindField('#edit-music', 'musicMode');
+
+    $('#edit-cancel')?.addEventListener('click', () => {
       if (exportController) exportController.abort();
     });
 
-    overlay.querySelector('#edit-export')?.addEventListener('click', async (e) => {
+    $('#edit-export')?.addEventListener('click', async (e) => {
       if (!src || !this.editorCan('exportVideo')) { this.toast('Export is unavailable here.'); return; }
       if (!approved) { this.toast('Approve the storyboard in Review before exporting.'); return; }
       const btn = e.currentTarget;
-      const cancel = overlay.querySelector('#edit-cancel');
+      const cancel = $('#edit-cancel');
       btn.disabled = true;
       if (cancel) cancel.classList.remove('hidden');
-      const s = Math.max(0, Number(start?.value) || 0);
-      const en = Math.max(s + 0.5, Number(end?.value) || duration || s + 5);
       exportController = new AbortController();
       try {
-        const E = this.editor();
+        const editor = this.editor();
         setProgress(true, 5, 'Exporting locally…');
-        const span = Math.max(0.5, en - s);
-        const assetClips = (Array.isArray(reel.assets) ? reel.assets : [])
-          .filter((a) => a && a.kind === 'raw' && a.url)
-          .map((a, i, all) => ({
-            url: a.url,
-            start: 0,
-            duration: span / all.length,
-            label: a.name || `Clip ${i + 1}`,
-          }));
-        const clips = assetClips.length ? assetClips : [{ url: src, start: 0, duration: span, label: 'Source' }];
-        const blob = await E.exportVideo({
+        const ex = this.editExportClips(edit);
+        const captions = M ? edit.captions.map((c, i) => M.normalizeCaption(c, i)) : edit.captions;
+        const blob = await editor.exportVideo({
           sourceUrl: src,
-          clips,
+          clips: ex.clips,
           plan,
-          start: s,
-          end: en,
-          format: overlay.querySelector('#edit-format')?.value || 'vertical',
-          look: overlay.querySelector('#edit-look')?.value || 'classic',
-          captions: this.parseCaptions(overlay.querySelector('#edit-captions')?.value || ''),
-          hook: { text: overlay.querySelector('#edit-hook')?.value || '', t: s, duration: 2 },
-          cta: { text: overlay.querySelector('#edit-cta')?.value || '', t: Math.max(s, en - 2), duration: 2 },
-          musicMode: overlay.querySelector('#edit-music')?.value || 'source',
+          start: 0,
+          end: ex.total,
+          format: edit.format || 'vertical',
+          look: edit.look || 'classic',
+          captions,
+          hook: edit.hook || null,
+          cta: edit.cta || null,
+          musicMode: edit.musicMode || 'source',
           onProgress: (p) => setProgress(true, 5 + Math.min(90, (Number(p) || 0) * 0.9), 'Exporting locally…'),
           signal: exportController.signal,
         });
         if (!(blob instanceof Blob)) throw new Error('No export was produced');
         setProgress(true, 96, 'Uploading…');
-        const ext = (typeof E.extForBlob === 'function' && E.extForBlob(blob)) || 'mp4';
+        const ext = (typeof editor.extForBlob === 'function' && editor.extForBlob(blob)) || 'mp4';
         const videoUrl = await this.uploadBlob(blob, `${reel.title || 'reel'}.${String(ext).replace(/[^a-z0-9]/gi, '') || 'mp4'}`, {
           kind: 'export', batch: 'versions', ofIndex: this.reelVersion(reel) + 1, reelId: reel.id,
         });
         const data = await this.request(`/reels/${reel.id}/version`, {
           method: 'POST',
-          body: { videoUrl, noMusicUrl: '', posterUrl: this.reelPosterUrl(reel) || '', note: 'Local browser export', idem: this.idem() },
+          body: {
+            videoUrl, noMusicUrl: '', posterUrl: this.reelPosterUrl(reel) || '',
+            note: `Local edit · ${edit.clips.length} clips · ${captions.length} captions`,
+            idem: this.idem(),
+          },
         });
         if (data.reel) Object.assign(reel, data.reel);
         this.closeSheet();
@@ -2505,21 +3041,32 @@ const app = {
       }
     });
 
-    overlay.querySelector('#edit-save-note')?.addEventListener('click', async () => {
+    $('#edit-save-note')?.addEventListener('click', async () => {
       try {
         await this.request(`/reels/${reel.id}/version`, {
           method: 'POST',
           body: {
-            videoUrl: this.reelVideoUrl(reel) || reel.videoUrl || '', noMusicUrl: '', posterUrl: this.reelPosterUrl(reel) || '',
-            note: overlay.querySelector('#edit-captions')?.value || 'Version note', idem: this.idem(),
+            videoUrl: this.reelVideoUrl(reel) || reel.videoUrl || '',
+            noMusicUrl: '',
+            posterUrl: this.reelPosterUrl(reel) || '',
+            note: `Edit note · ${edit.clips.length} clips · ${edit.captions.length} captions`,
+            idem: this.idem(),
           },
         });
         this.toast('Version saved.');
         this.loadReels();
-      } catch (e) {
+      } catch (err) {
         this.toast('Version note could not be saved on the service.');
       }
     });
+
+    renderTimeline();
+    renderPanel();
+    renderCaptions();
+    const seek = $('#edit-seek');
+    if (seek) seek.max = String(Math.max(0.05, totalOf()));
+    syncTime(0);
+    initPreview();
   },
 
   /* =====================================================================

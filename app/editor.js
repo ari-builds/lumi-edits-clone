@@ -174,6 +174,13 @@
 
   function getLook(name) { return looks[name] || looks.classic; }
 
+  // Edit-model helpers come from app/edit-model.js (also usable from Node smokes).
+  var EM = win.LumiEditModel || null;
+  function model() {
+    if (EM) return EM;
+    throw new Error('LumiEditModel is not loaded');
+  }
+
   // ---------------------------------------------------------------------------
   // Feature probes + mime selection
   // ---------------------------------------------------------------------------
@@ -565,8 +572,11 @@
       .slice().sort(function (a, b) { return num(a.t, 0) - num(b.t, 0); });
     var found = null;
     for (var i = 0; i < list.length; i++) {
-      if (t + 0.001 >= num(list[i].t, 0)) found = list[i];
-      else break;
+      var c = list[i];
+      if (t + 0.001 < num(c.t, 0)) break;
+      var dur = num(c.duration, 3);
+      if (!(dur > 0)) dur = 3;
+      if (t < num(c.t, 0) + dur) found = c;
     }
     return found;
   }
@@ -591,28 +601,24 @@
     return found && inWindow(t, found.t, found.duration) ? found : null;
   }
 
-  /** One frame: crop + look filter + legibility scrims + plan overlays. */
-  function renderFrame(ctx, source, opts, w, h, t) {
-    opts = opts || {};
-    var look = getLook(opts.look);
-    var overlayT = opts.timelineTime == null ? t : num(opts.timelineTime, t);
-    var scene = activePlanScene(opts.plan, overlayT);
-    ctx.save();
-    try { ctx.fillStyle = look.bg; ctx.fillRect(0, 0, w, h); } catch (e) {}
+  /** Apply interpolated pan/zoom/rotation keyframes to a frame. */
+  function applyMotion(ctx, motion, t, w, h, extraZoom) {
+    var m = { x: 0, y: 0, zoom: 1, rotate: 0 };
+    try { m = model().evaluateMotion(motion, t); } catch (e) { /* no edit model: static frame */ }
+    var zoom = clamp(num(m.zoom, 1) * num(extraZoom || 1, 1), 0.5, 4);
+    var rot = num(m.rotate, 0) * Math.PI / 180;
+    var panX = clamp(num(m.x, 0), -1, 1) * w * 0.12;
+    var panY = clamp(num(m.y, 0), -1, 1) * h * 0.12;
+    if (zoom === 1 && !rot && !panX && !panY) return;
+    // Slight overscan keeps the crop filled when panning or rotating.
+    var overscan = zoom * (1 + Math.abs(panX) / Math.max(1, w) + Math.abs(panY) / Math.max(1, h) + Math.abs(rot) * 0.12);
+    ctx.translate(w / 2 + panX, h / 2 + panY);
+    if (rot) ctx.rotate(rot);
+    ctx.scale(overscan, overscan);
+    ctx.translate(-w / 2, -h / 2);
+  }
 
-    var zoom = 1;
-    if (scene && scene.motion && /zoom|punch/i.test(String(scene.motion))) {
-      zoom = 1.035 + Math.sin(overlayT * 3.1) * 0.015;
-    }
-    ctx.save();
-    if (zoom !== 1) {
-      ctx.translate(w / 2, h / 2);
-      ctx.scale(zoom, zoom);
-      ctx.translate(-w / 2, -h / 2);
-    }
-    drawSourceCover(ctx, source, w, h, look.filter);
-    ctx.restore();
-
+  function drawScrims(ctx, w, h) {
     var top = ctx.createLinearGradient(0, 0, 0, h * 0.45);
     top.addColorStop(0, 'rgba(0,0,0,0.52)');
     top.addColorStop(1, 'rgba(0,0,0,0)');
@@ -623,7 +629,39 @@
     bottom.addColorStop(1, 'rgba(0,0,0,0.7)');
     ctx.fillStyle = bottom;
     ctx.fillRect(0, h * 0.52, w, h * 0.48);
+  }
 
+  /** Draw the media layer only. `cfg` controls background/scrims/opacity for transitions. */
+  function renderMedia(ctx, source, opts, w, h, t, cfg) {
+    opts = opts || {};
+    cfg = cfg || {};
+    var look = getLook(opts.look);
+    ctx.save();
+    if (cfg.opacity != null) ctx.globalAlpha = clamp(num(cfg.opacity, 1), 0, 1);
+    if (cfg.background !== false) {
+      try { ctx.fillStyle = look.bg; ctx.fillRect(0, 0, w, h); } catch (e) {}
+    }
+    ctx.save();
+    var legacyZoom = 1;
+    if (!opts.motion) {
+      var scene = activePlanScene(opts.plan, opts.timelineTime == null ? t : num(opts.timelineTime, t));
+      if (scene && scene.motion && /zoom|punch/i.test(String(scene.motion))) {
+        legacyZoom = 1.035 + Math.sin(num(opts.timelineTime, t) * 3.1) * 0.015;
+      }
+    }
+    applyMotion(ctx, opts.motion, t, w, h, legacyZoom * (cfg.extraZoom || 1));
+    drawSourceCover(ctx, source, w, h, look.filter);
+    ctx.restore();
+    if (cfg.scrims !== false) drawScrims(ctx, w, h);
+    ctx.restore();
+  }
+
+  /** Plan overlays, hook, styled captions and CTA. */
+  function renderOverlays(ctx, opts, w, h, t) {
+    opts = opts || {};
+    var look = getLook(opts.look);
+    var overlayT = opts.timelineTime == null ? t : num(opts.timelineTime, t);
+    var scene = activePlanScene(opts.plan, overlayT);
     var unit = Math.min(w, h);
     var cx = w / 2;
 
@@ -635,7 +673,7 @@
       ctx.lineWidth = Math.max(2, unit * 0.004);
       ctx.strokeRect(w * 0.06, unit * 0.30, w * 0.88, unit * 0.11);
       ctx.restore();
-      drawTextBlock(ctx, `B-ROLL CUE · ${scene.broll}`, {
+      drawTextBlock(ctx, 'B-ROLL CUE · ' + scene.broll, {
         cx: cx, top: unit * 0.315, maxWidth: w * 0.82,
         font: 'system-ui, -apple-system, "Segoe UI", sans-serif',
         fontSize: unit * 0.032, weight: '700',
@@ -651,14 +689,25 @@
         underline: true, accent: look.accent, maxLines: 2
       });
     }
-    var cap = activeCaption(opts.captions, overlayT) || (opts.captions && opts.captions.length === 0 && scene && scene.caption ? { text: scene.caption } : null);
-    if (cap) {
+
+    var cap = activeCaption(opts.captions, overlayT);
+    if (!cap && (!opts.captions || !opts.captions.length) && scene && scene.caption) {
+      cap = { text: scene.caption };
+    }
+    if (cap && cap.text) {
+      var sizeFactor = ({ S: 0.052, M: 0.066, L: 0.082 })[String(cap.size || 'M').toUpperCase()] || 0.066;
+      var capTop = String(cap.position || 'bottom') === 'top' ? unit * 0.16
+        : String(cap.position) === 'middle' ? h * 0.46 - unit * 0.06
+          : h - unit * 0.42;
       drawTextBlock(ctx, cap.text, {
-        cx: cx, top: h - unit * 0.42, maxWidth: w * 0.88,
-        font: look.font, fontSize: unit * 0.066, weight: '800',
-        color: look.captionColor, stroke: look.captionStroke, maxLines: 3
+        cx: cx, top: capTop, maxWidth: w * 0.88,
+        font: look.font, fontSize: unit * sizeFactor,
+        weight: String(cap.weight || 800),
+        color: /^#[0-9a-f]{3,8}$/i.test(String(cap.color || '')) ? cap.color : look.captionColor,
+        stroke: look.captionStroke, maxLines: 3
       });
     }
+
     if (opts.cta && opts.cta.text && inWindow(overlayT, opts.cta.t, num(opts.cta.duration, 4))) {
       drawTextBlock(ctx, opts.cta.text, {
         cx: cx, top: h - unit * 0.12, maxWidth: w * 0.84,
@@ -667,7 +716,75 @@
         color: look.accent, stroke: look.captionStroke, maxLines: 2
       });
     }
-    ctx.restore();
+  }
+
+  /** One frame: media + overlays (used by posters and simple sources). */
+  function renderFrame(ctx, source, opts, w, h, t) {
+    renderMedia(ctx, source, opts, w, h, t, {});
+    renderOverlays(ctx, opts, w, h, opts && opts.timelineTime == null ? t : num(opts.timelineTime, t));
+  }
+
+  /** Options for one clip at a clip-local time. */
+  function clipOptions(opts, clip, localT, overlayT) {
+    var o = Object.assign({}, opts || {});
+    o.look = (clip && clip.look) || o.look;
+    o.motion = clip && clip.motion ? clip.motion : o.motion;
+    o.clip = clip || null;
+    o.timelineTime = overlayT == null ? localT : overlayT;
+    return o;
+  }
+
+  /**
+   * Render a frame from a normalised timeline. Shared by preview and export so
+   * transitions, motion and caption styling look identical in both.
+   */
+  function renderTimelineFrame(ctx, clips, index, elapsed, opts, w, h, overlayStart) {
+    var c = clips[index];
+    if (!c || !c.element) return;
+    var local = clamp(elapsed - c.timelineStart, 0, Math.max(0.05, c.duration - 0.001));
+    var overlayT = (overlayStart || 0) + elapsed;
+    var tr = c.transition || { type: 'none', duration: 0 };
+    var useTransition = index > 0 && tr.type && tr.type !== 'none' && tr.duration > 0 && local < tr.duration;
+    if (!useTransition) {
+      renderMedia(ctx, c.element, clipOptions(opts, c, local, overlayT), w, h, local, {});
+    } else {
+      var prev = clips[index - 1];
+      var p = clamp(local / tr.duration, 0, 1);
+      var prevLocal = Math.max(0, finite(prev.duration) - 0.02);
+      renderMedia(ctx, prev.element, clipOptions(opts, prev, prevLocal, overlayT), w, h, prevLocal, {});
+      var curOpts = clipOptions(opts, c, local, overlayT);
+      if (tr.type === 'wipe') {
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(0, 0, w * p, h);
+        ctx.clip();
+        renderMedia(ctx, c.element, curOpts, w, h, local, { background: false, scrims: false });
+        ctx.restore();
+      } else if (tr.type === 'slide') {
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(w * (1 - p), 0, w * p, h);
+        ctx.clip();
+        ctx.translate(w * (1 - p), 0);
+        renderMedia(ctx, c.element, curOpts, w, h, local, { background: false, scrims: false });
+        ctx.restore();
+      } else {
+        var extraZoom = tr.type === 'zoom' ? 1.16 - 0.16 * p : 1;
+        renderMedia(ctx, c.element, curOpts, w, h, local, {
+          background: false, scrims: false,
+          opacity: p, extraZoom: extraZoom
+        });
+        drawScrims(ctx, w, h);
+      }
+    }
+    renderOverlays(ctx, clipOptions(opts, c, local, overlayT), w, h, overlayT);
+  }
+
+  function activeClipIndex(clips, elapsed) {
+    for (var i = clips.length - 1; i >= 0; i--) {
+      if (elapsed >= clips[i].timelineStart) return i;
+    }
+    return 0;
   }
 
   function targetSize(format) {
@@ -862,7 +979,7 @@
     var canvasStream = null, recorder = null;
     var raf = 0, watchdog = 0;
     var audioCtx = null, sourceDest = null, sfxDest = null;
-    var sourceNode = null, clipCapture = null, fallbackCapture = null;
+    var sourceNode = null, clipCapture = null, fallbackCapture = null, clipGain = null;
     var audioTracks = [];
     var rafFn = win.requestAnimationFrame || function (cb) { return setTimeout(function () { cb(Date.now()); }, 33); };
     var cancelRaf = win.cancelAnimationFrame || function (id) { clearTimeout(id); };
@@ -870,40 +987,49 @@
     function report(v) { try { onProgress(clamp(num(v, 0), 0, 100)); } catch (e) {} }
 
     function buildTimeline() {
-      var defs = hasClips ? options.clips.slice(0, 24) : [{ url: options.sourceUrl, start: num(options.start, 0), duration: 0 }];
-      return Promise.all(defs.map(function (d) {
-        var url = (d && (d.url || d.sourceUrl)) || (typeof d === 'string' ? d : '');
-        return acquireSource(url);
-      })).then(function (loaded) {
-        var lead = loaded[0];
-        var leadDuration = finite(lead && lead.duration);
-        if (!leadDuration) throw new Error('Source duration is unavailable');
-        var start = hasClips ? 0 : clamp(num(options.start, 0), 0, leadDuration);
-        var overlayStart = hasClips ? clamp(num(options.start, 0), 0, leadDuration) : start;
-        var end = hasClips ? Infinity : clamp(num(options.end, leadDuration), start + 0.05, leadDuration);
-        var budget = hasClips ? Infinity : (end - start);
-        var cursor = 0;
-        loaded.forEach(function (r, i) {
-          if (!r || budget <= 0.01) { if (r) releaseSource(r); return; }
-          var d = defs[i] || {};
-          var srcDur = finite(r.duration || r.element.duration);
-          var inPoint = hasClips
-            ? clamp(num(d.start, 0), 0, Math.max(0, srcDur - 0.05))
-            : start;
-          var len = num(d.duration, hasClips ? Math.max(0.05, srcDur - inPoint) : budget);
-          if (!(len > 0)) len = Math.max(0.05, srcDur - inPoint);
-          len = Math.max(0.05, Math.min(len, Math.max(0.05, srcDur - inPoint), Math.max(0.05, budget)));
-          refs.push(r);
-          clips.push({
-            ref: r, element: r.element, inPoint: inPoint, len: len,
-            timelineStart: cursor, srcDuration: srcDur
-          });
-          cursor += len;
-          budget -= len;
-        });
-        if (!clips.length) throw new Error('No playable clips in the timeline');
-        return { total: cursor, start: start, overlayStart: overlayStart };
+      var legacyStart = clamp(num(options.start, 0), 0, 3600);
+      var legacyEnd = Math.max(legacyStart + 0.05, num(options.end, legacyStart + 5));
+      var defs = hasClips
+        ? options.clips.slice(0, 24)
+        : [{ url: options.sourceUrl, inPoint: legacyStart, duration: legacyEnd - legacyStart }];
+      var normalized = model().normalizeTimeline(defs, {
+        defaultDuration: Math.max(0.05, legacyEnd - legacyStart),
+        look: options.look,
+        format: options.format,
+        musicMode: options.musicMode
       });
+      if (!normalized.clips.length) return Promise.reject(new Error('No playable clips in the timeline'));
+
+      return Promise.all(normalized.clips.map(function (c) { return acquireSource(c.url); }))
+        .then(function (loaded) {
+          var start = hasClips ? 0 : legacyStart;
+          var overlayStart = hasClips ? 0 : start;
+          loaded.forEach(function (r, i) {
+            var c = normalized.clips[i];
+            if (!r) return;
+            var srcDur = finite(r.duration || r.element.duration);
+            if (!srcDur) { releaseSource(r); return; }
+            var inPoint = clamp(c.inPoint, 0, Math.max(0, srcDur - 0.05));
+            var len = clamp(c.duration, 0.05, Math.max(0.05, srcDur - inPoint));
+            if (!hasClips) len = Math.min(len, Math.max(0.05, legacyEnd - start));
+            c.inPoint = inPoint;
+            c.duration = len;
+            c.sourceDuration = srcDur;
+            c.motion = model().normalizeMotion(c.motion, len);
+            c.element = r.element;
+            c.ref = r;
+            refs.push(r);
+            clips.push(c);
+          });
+          if (!clips.length) throw new Error('No playable clips in the timeline');
+          if (!hasClips) {
+            model().reflow(clips);
+            clips.forEach(function (c) { c.timelineStart += start; });
+          }
+          var total = 0;
+          clips.forEach(function (c) { total = Math.max(total, c.timelineStart + c.duration); });
+          return { total: Math.max(0.05, total), start: start, overlayStart: overlayStart };
+        });
     }
 
     function setupAudio() {
@@ -938,7 +1064,7 @@
       }
     }
 
-    function connectClipAudio(element) {
+    function connectClipAudio(element, clip) {
       if (!audioCtx || !sourceDest || options.musicMode === 'none') return;
       disconnectClipAudio();
       try {
@@ -947,15 +1073,34 @@
         clipCapture = fn.call(element);
         if (!clipCapture || !clipCapture.getAudioTracks || !clipCapture.getAudioTracks().length) return;
         sourceNode = audioCtx.createMediaStreamSource(clipCapture);
-        sourceNode.connect(sourceDest);
-      } catch (e) { clipCapture = null; sourceNode = null; }
+        clipGain = audioCtx.createGain();
+        var a = (clip && clip.audio) || {};
+        var vol = a.muted ? 0 : clamp(num(a.volume, 1), 0, 2);
+        var len = Math.max(0.05, finite(clip && clip.duration) || 1);
+        var fadeIn = clamp(num(a.fadeIn, 0), 0, len / 2);
+        var fadeOut = clamp(num(a.fadeOut, 0), 0, len / 2);
+        var now = audioCtx.currentTime;
+        var startVol = fadeIn > 0 ? 0.0001 : vol;
+        var endVol = fadeOut > 0 ? 0.0001 : vol;
+        if (!vol) { startVol = 0; endVol = 0; }
+        clipGain.gain.setValueAtTime(startVol, now);
+        if (fadeIn > 0) clipGain.gain.linearRampToValueAtTime(vol, now + fadeIn);
+        clipGain.gain.setValueAtTime(vol, now + Math.max(fadeIn, len - fadeOut));
+        if (fadeOut > 0) clipGain.gain.linearRampToValueAtTime(endVol, now + len);
+        sourceNode.connect(clipGain);
+        clipGain.connect(sourceDest);
+      } catch (e) {
+        clipCapture = null; sourceNode = null; clipGain = null;
+      }
     }
 
     function disconnectClipAudio() {
       try { if (sourceNode) sourceNode.disconnect(); } catch (e) {}
+      try { if (clipGain) clipGain.disconnect(); } catch (e) {}
       try { if (clipCapture && clipCapture.getTracks) stopTracks(clipCapture.getTracks()); } catch (e) {}
       sourceNode = null;
       clipCapture = null;
+      clipGain = null;
     }
 
     function blip(at, label) {
@@ -1089,18 +1234,15 @@
             if (signal.aborted) { onAbort(); return; }
           }
 
-          function frameOptions(elapsed) {
-            return Object.assign({}, options, { timelineTime: overlayStart + elapsed, plan: options.plan || null });
-          }
-
           function switchClip(next) {
             var prev = clips[activeIndex];
             try { prev.element.pause(); } catch (e) {}
+            try { prev.element.currentTime = prev.inPoint + Math.max(0, prev.duration - 0.02); } catch (e) {}
             activeIndex = next;
             var c = clips[next];
             seekTo(c.element, c.inPoint).then(function () {
               if (settled) return;
-              connectClipAudio(c.element);
+              connectClipAudio(c.element, c);
               return playMedia(c.element);
             }).catch(fail);
           }
@@ -1111,24 +1253,23 @@
             if (signal && signal.aborted) { onAbort(); return; }
             if (elapsed >= total) { stopNow(); return; }
 
-            var next = activeIndex;
-            while (next < clips.length - 1 && elapsed >= clips[next].timelineStart + clips[next].len) next++;
+            var next = activeClipIndex(clips, elapsed);
             if (next !== activeIndex) switchClip(next);
 
             var c = clips[activeIndex];
             var localTarget = c.inPoint + (elapsed - c.timelineStart);
             var local = finite(c.element.currentTime);
-            if (Math.abs(local - localTarget) > 0.5 && localTarget < c.inPoint + c.len) {
+            if (Math.abs(local - localTarget) > 0.5 && localTarget < c.inPoint + c.duration) {
               try { c.element.currentTime = localTarget; } catch (e) {}
             }
-            try { renderFrame(ctx, c.element, frameOptions(elapsed), size.w, size.h, local); }
+            try { renderTimelineFrame(ctx, clips, activeIndex, elapsed, options, size.w, size.h, overlayStart); }
             catch (e) { fail(e); return; }
             report(elapsed / total * 100);
             raf = rafFn(tick);
           }
 
           // Paint one frame and verify the canvas is readable before recording.
-          try { renderFrame(ctx, first.element, frameOptions(0), size.w, size.h, first.inPoint); }
+          try { renderTimelineFrame(ctx, clips, 0, 0, options, size.w, size.h, overlayStart); }
           catch (e) { fail(e); return; }
           try { ctx.getImageData(0, 0, 1, 1); }
           catch (e) {
@@ -1136,7 +1277,7 @@
             return;
           }
 
-          connectClipAudio(first.element);
+          connectClipAudio(first.element, first);
           scheduleSfx(overlayStart, total);
           playMedia(first.element).then(function () {
             if (settled) return;
@@ -1713,6 +1854,128 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Seek-safe canvas preview (muted; export carries the real audio)
+  // ---------------------------------------------------------------------------
+  function createPreview(options) {
+    options = options || {};
+    var canvas = options.canvas;
+    if (!canvas || typeof canvas.getContext !== 'function') {
+      return Promise.reject(new Error('createPreview requires a canvas'));
+    }
+    var edit = options.edit || {};
+    var sourceClips = Array.isArray(edit.clips) ? edit.clips : options.clips;
+    var size = targetSize(edit.format || options.format);
+    canvas.width = size.w;
+    canvas.height = size.h;
+    var ctx = canvas.getContext('2d', { alpha: false });
+    if (!ctx) return Promise.reject(new Error('Canvas is not available'));
+
+    var timeline = model().normalizeTimeline(sourceClips, {
+      defaultDuration: 6,
+      look: edit.look || options.look || 'classic',
+      format: edit.format || options.format || 'vertical',
+      musicMode: edit.musicMode || options.musicMode || 'source'
+    });
+    var opts = Object.assign({}, edit, options, {
+      clips: timeline.clips,
+      captions: edit.captions || options.captions || [],
+      hook: edit.hook || options.hook || null,
+      cta: edit.cta || options.cta || null,
+      plan: options.plan || edit.plan || null,
+      look: edit.look || options.look || 'classic'
+    });
+    var refs = [];
+    var t = 0;
+    var index = 0;
+    var playing = false;
+    var raf = 0;
+    var last = 0;
+    var destroyed = false;
+    var rafFn = win.requestAnimationFrame || function (cb) { return setTimeout(function () { cb(Date.now()); }, 33); };
+    var cancelRaf = win.cancelAnimationFrame || function (id) { clearTimeout(id); };
+    var onTime = typeof options.onTime === 'function' ? options.onTime : noop;
+
+    function syncClip(i, time, hard) {
+      var c = timeline.clips[i];
+      if (!c || !c.element) return;
+      var local = clamp(time - c.timelineStart, 0, Math.max(0, c.duration - 0.02));
+      var target = c.inPoint + local;
+      var current = finite(c.element.currentTime);
+      if (hard || Math.abs(current - target) > 0.6) {
+        try { c.element.currentTime = target; } catch (e) {}
+      }
+    }
+
+    function draw(time) {
+      t = clamp(num(time, 0), 0, timeline.total);
+      index = activeClipIndex(timeline.clips, t);
+      syncClip(index, t, !playing);
+      if (index > 0) syncClip(index - 1, t - 0.01, true);
+      try { renderTimelineFrame(ctx, timeline.clips, index, t, opts, size.w, size.h, 0); }
+      catch (e) { /* a transient seek frame is safe to skip */ }
+      onTime(t, index);
+    }
+
+    function loop(now) {
+      if (!playing || destroyed) return;
+      var dt = last ? Math.min(0.25, Math.max(0, (now - last) / 1000)) : 0;
+      last = now;
+      draw(t + dt);
+      if (t >= timeline.total - 0.001) { playing = false; return; }
+      raf = rafFn(loop);
+    }
+
+    return Promise.all(timeline.clips.map(function (c) { return acquireSource(c.url); }))
+      .then(function (loaded) {
+        loaded.forEach(function (r, i) {
+          if (!r) return;
+          refs.push(r);
+          timeline.clips[i].element = r.element;
+          timeline.clips[i].ref = r;
+          try { r.element.muted = true; } catch (e) {}
+        });
+        if (!timeline.clips.some(function (c) { return !!c.element; })) {
+          throw new Error('No playable clips in this edit');
+        }
+        draw(0);
+        return {
+          duration: function () { return timeline.total; },
+          currentTime: function () { return t; },
+          seek: function (v) {
+            var target = clamp(num(v, 0), 0, timeline.total);
+            var i = activeClipIndex(timeline.clips, target);
+            var c = timeline.clips[i];
+            if (!c || !c.element) return Promise.resolve();
+            var local = clamp(target - c.timelineStart, 0, Math.max(0, c.duration - 0.02));
+            return seekTo(c.element, c.inPoint + local).then(function () { draw(target); });
+          },
+          play: function () {
+            if (destroyed || playing) return;
+            if (t >= timeline.total - 0.01) draw(0);
+            playing = true;
+            last = 0;
+            try { playMedia(timeline.clips[index].element).catch(noop); } catch (e) {}
+            raf = rafFn(loop);
+          },
+          pause: function () {
+            playing = false;
+            if (raf) { try { cancelRaf(raf); } catch (e) {} raf = 0; }
+            timeline.clips.forEach(function (c) { try { c.element.pause(); } catch (e) {} });
+          },
+          destroy: function () {
+            if (destroyed) return;
+            destroyed = true;
+            playing = false;
+            if (raf) { try { cancelRaf(raf); } catch (e) {} raf = 0; }
+            timeline.clips.forEach(function (c) { try { c.element.pause(); } catch (e) {} });
+            refs.forEach(function (r) { releaseSource(r); });
+            refs = [];
+          }
+        };
+      });
+  }
+
+  // ---------------------------------------------------------------------------
   // Public surface
   // ---------------------------------------------------------------------------
   win.LumiEditor = {
@@ -1720,12 +1983,14 @@
     measureFile: measureFile,
     loadSource: loadSource,
     exportVideo: exportVideo,
+    createPreview: createPreview,
     makePoster: makePoster,
     openCamera: openCamera,
     drawCover: drawCover,
     looks: looks,
     fmtTime: fmtTime,
     extForBlob: extForBlob,
+    renderTimelineFrame: renderTimelineFrame,
     // Optional helpers
     revoke: revoke,
     listTakes: listTakes,

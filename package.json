@@ -10,6 +10,7 @@
     "smoke:parity": "node tools/smoke-lumi-parity.cjs",
     "smoke:flow": "node tools/smoke-lumi-flow.cjs",
     "smoke:plan": "node tools/smoke-lumi-plan.cjs",
+    "smoke:editor": "node tools/smoke-lumi-editor.cjs",
     "check:db": "node tools/check-db.cjs",
     "extract:lumi": "node tools/extract-lumi-scripts.cjs"
   },
