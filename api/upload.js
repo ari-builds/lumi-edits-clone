@@ -1,5 +1,5 @@
 // Upload API — issues presigned PUT URLs for real video storage in Neon Object Storage.
-//   POST /api/upload  { fileName, fileType, reel, batch, of, kind } -> { uploadUrl, publicUrl, pathname, key, ... }
+//   POST /api/upload  { fileName, fileType, reel|reelId, batch, of|ofIndex, kind } -> { uploadUrl, publicUrl, pathname, key, ... }
 // The browser then does: fetch(uploadUrl, { method: 'PUT', body: file, headers: { 'Content-Type': fileType } })
 // The returned publicUrl is a permanent URL used as a reel's videoUrl.
 // Upload metadata is best-effort: a DB problem never fails the presign.
@@ -47,12 +47,14 @@ module.exports = async (req, res) => {
     try {
       await db.ready();
       const user = await db.userFromReq(req).catch(() => null);
-      const reelId = body.reel && typeof body.reel === 'object' ? body.reel.id : body.reel;
+      const reelValue = body.reel != null ? body.reel : body.reelId;
+      const reelId = reelValue && typeof reelValue === 'object' ? reelValue.id : reelValue;
+      const ofValue = body.of != null ? body.of : body.ofIndex;
       await db.query(
         'INSERT INTO uploads (id, user_id, reel_id, batch, of_index, kind, object_key, public_url, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)',
         [db.newId('up_'), user ? user.id : null, reelId ? String(reelId) : null,
-          String(body.batch || ''), Number(body.of || 0) || 0, String(body.kind || ''),
-          key, signed.publicUrl, new Date().toISOString()]
+          String(body.batch || ''), Number(ofValue || 0) || 0,
+          String(body.kind || 'raw'), key, signed.publicUrl, new Date().toISOString()]
       );
     } catch (_) { /* best effort only */ }
 

@@ -397,9 +397,13 @@
   function measureFile(file) {
     return loadSourceInternal(file, true).then(function (meta) {
       var info = {
+        width: meta.width,
+        height: meta.height,
+        duration: meta.duration,
         w: meta.width,
         h: meta.height,
         dur: meta.duration,
+        hasAudio: !!meta.hasAudio,
         type: (file && file.type) || '',
         name: (file && file.name) || '',
         size: (file && file.size) || 0
@@ -567,13 +571,47 @@
     return found;
   }
 
-  /** One frame: crop + look filter + legibility scrims + hook/caption/CTA. */
+  function activePlanScene(plan, t) {
+    var scenes = plan && Array.isArray(plan.scenes) ? plan.scenes : [];
+    for (var i = 0; i < scenes.length; i++) {
+      var s = scenes[i] || {};
+      if (inWindow(t, s.start, s.duration)) return s;
+    }
+    return null;
+  }
+
+  function activeWindow(items, t) {
+    if (!Array.isArray(items) || !items.length) return null;
+    var list = items.slice().sort(function (a, b) { return num(a.t, 0) - num(b.t, 0); });
+    var found = null;
+    for (var i = 0; i < list.length; i++) {
+      if (t + 0.001 >= num(list[i].t, 0)) found = list[i];
+      else break;
+    }
+    return found && inWindow(t, found.t, found.duration) ? found : null;
+  }
+
+  /** One frame: crop + look filter + legibility scrims + plan overlays. */
   function renderFrame(ctx, source, opts, w, h, t) {
     opts = opts || {};
     var look = getLook(opts.look);
+    var overlayT = opts.timelineTime == null ? t : num(opts.timelineTime, t);
+    var scene = activePlanScene(opts.plan, overlayT);
     ctx.save();
     try { ctx.fillStyle = look.bg; ctx.fillRect(0, 0, w, h); } catch (e) {}
+
+    var zoom = 1;
+    if (scene && scene.motion && /zoom|punch/i.test(String(scene.motion))) {
+      zoom = 1.035 + Math.sin(overlayT * 3.1) * 0.015;
+    }
+    ctx.save();
+    if (zoom !== 1) {
+      ctx.translate(w / 2, h / 2);
+      ctx.scale(zoom, zoom);
+      ctx.translate(-w / 2, -h / 2);
+    }
     drawSourceCover(ctx, source, w, h, look.filter);
+    ctx.restore();
 
     var top = ctx.createLinearGradient(0, 0, 0, h * 0.45);
     top.addColorStop(0, 'rgba(0,0,0,0.52)');
@@ -588,7 +626,24 @@
 
     var unit = Math.min(w, h);
     var cx = w / 2;
-    if (opts.hook && opts.hook.text && inWindow(t, opts.hook.t, num(opts.hook.duration, 3))) {
+
+    if (scene && scene.broll) {
+      ctx.save();
+      ctx.fillStyle = 'rgba(8,10,16,0.42)';
+      ctx.fillRect(w * 0.06, unit * 0.30, w * 0.88, unit * 0.11);
+      ctx.strokeStyle = look.accent;
+      ctx.lineWidth = Math.max(2, unit * 0.004);
+      ctx.strokeRect(w * 0.06, unit * 0.30, w * 0.88, unit * 0.11);
+      ctx.restore();
+      drawTextBlock(ctx, `B-ROLL CUE · ${scene.broll}`, {
+        cx: cx, top: unit * 0.315, maxWidth: w * 0.82,
+        font: 'system-ui, -apple-system, "Segoe UI", sans-serif',
+        fontSize: unit * 0.032, weight: '700',
+        color: look.captionColor, stroke: look.captionStroke, maxLines: 1
+      });
+    }
+
+    if (opts.hook && opts.hook.text && inWindow(overlayT, opts.hook.t, num(opts.hook.duration, 3))) {
       drawTextBlock(ctx, opts.hook.text, {
         cx: cx, top: unit * 0.07, maxWidth: w * 0.86,
         font: look.font, fontSize: unit * 0.086, weight: '900',
@@ -596,7 +651,7 @@
         underline: true, accent: look.accent, maxLines: 2
       });
     }
-    var cap = activeCaption(opts.captions, t);
+    var cap = activeCaption(opts.captions, overlayT) || (opts.captions && opts.captions.length === 0 && scene && scene.caption ? { text: scene.caption } : null);
     if (cap) {
       drawTextBlock(ctx, cap.text, {
         cx: cx, top: h - unit * 0.42, maxWidth: w * 0.88,
@@ -604,7 +659,7 @@
         color: look.captionColor, stroke: look.captionStroke, maxLines: 3
       });
     }
-    if (opts.cta && opts.cta.text && inWindow(t, opts.cta.t, num(opts.cta.duration, 4))) {
+    if (opts.cta && opts.cta.text && inWindow(overlayT, opts.cta.t, num(opts.cta.duration, 4))) {
       drawTextBlock(ctx, opts.cta.text, {
         cx: cx, top: h - unit * 0.12, maxWidth: w * 0.84,
         font: 'system-ui, -apple-system, "Segoe UI", sans-serif',
@@ -788,7 +843,10 @@
     options = options || {};
     var signal = options.signal;
     if (signal && signal.aborted) return Promise.reject(abortError());
-    if (!options.sourceUrl) return Promise.reject(new Error('exportVideo requires sourceUrl'));
+    var hasClips = Array.isArray(options.clips) && options.clips.length > 0;
+    if (!options.sourceUrl && !hasClips) {
+      return Promise.reject(new Error('exportVideo requires sourceUrl or clips'));
+    }
     var caps = probes();
     if (!caps.mediaRecorder || !caps.canvasCapture) {
       return Promise.reject(new Error(
@@ -798,22 +856,165 @@
 
     var onProgress = typeof options.onProgress === 'function' ? options.onProgress : noop;
     var size = targetSize(options.format);
-    var ref = null, el = null;
-    var canvasStream = null, audioCapture = null, recorder = null;
+    var refs = [];
+    var clips = [];
+    var activeIndex = 0;
+    var canvasStream = null, recorder = null;
     var raf = 0, watchdog = 0;
+    var audioCtx = null, sourceDest = null, sfxDest = null;
+    var sourceNode = null, clipCapture = null, fallbackCapture = null;
+    var audioTracks = [];
     var rafFn = win.requestAnimationFrame || function (cb) { return setTimeout(function () { cb(Date.now()); }, 33); };
     var cancelRaf = win.cancelAnimationFrame || function (id) { clearTimeout(id); };
 
     function report(v) { try { onProgress(clamp(num(v, 0), 0, 100)); } catch (e) {} }
 
-    return acquireSource(options.sourceUrl).then(function (r) {
-      ref = r;
-      el = r.element;
-      var duration = finite(r.duration || el.duration);
-      if (!duration) throw new Error('Source duration is unavailable');
-      var start = clamp(num(options.start, 0), 0, duration);
-      var end = clamp(num(options.end, duration), start + 0.05, duration);
-      if (end <= start) end = Math.min(duration, start + 0.05);
+    function buildTimeline() {
+      var defs = hasClips ? options.clips.slice(0, 24) : [{ url: options.sourceUrl, start: num(options.start, 0), duration: 0 }];
+      return Promise.all(defs.map(function (d) {
+        var url = (d && (d.url || d.sourceUrl)) || (typeof d === 'string' ? d : '');
+        return acquireSource(url);
+      })).then(function (loaded) {
+        var lead = loaded[0];
+        var leadDuration = finite(lead && lead.duration);
+        if (!leadDuration) throw new Error('Source duration is unavailable');
+        var start = hasClips ? 0 : clamp(num(options.start, 0), 0, leadDuration);
+        var overlayStart = hasClips ? clamp(num(options.start, 0), 0, leadDuration) : start;
+        var end = hasClips ? Infinity : clamp(num(options.end, leadDuration), start + 0.05, leadDuration);
+        var budget = hasClips ? Infinity : (end - start);
+        var cursor = 0;
+        loaded.forEach(function (r, i) {
+          if (!r || budget <= 0.01) { if (r) releaseSource(r); return; }
+          var d = defs[i] || {};
+          var srcDur = finite(r.duration || r.element.duration);
+          var inPoint = hasClips
+            ? clamp(num(d.start, 0), 0, Math.max(0, srcDur - 0.05))
+            : start;
+          var len = num(d.duration, hasClips ? Math.max(0.05, srcDur - inPoint) : budget);
+          if (!(len > 0)) len = Math.max(0.05, srcDur - inPoint);
+          len = Math.max(0.05, Math.min(len, Math.max(0.05, srcDur - inPoint), Math.max(0.05, budget)));
+          refs.push(r);
+          clips.push({
+            ref: r, element: r.element, inPoint: inPoint, len: len,
+            timelineStart: cursor, srcDuration: srcDur
+          });
+          cursor += len;
+          budget -= len;
+        });
+        if (!clips.length) throw new Error('No playable clips in the timeline');
+        return { total: cursor, start: start, overlayStart: overlayStart };
+      });
+    }
+
+    function setupAudio() {
+      try {
+        var AudioCtor = win.AudioContext || win.webkitAudioContext;
+        if (AudioCtor) {
+          audioCtx = new AudioCtor();
+          if (typeof audioCtx.createMediaStreamDestination === 'function') {
+            sourceDest = audioCtx.createMediaStreamDestination();
+            sfxDest = audioCtx.createMediaStreamDestination();
+            if (options.musicMode !== 'none') {
+              audioTracks = audioTracks.concat(sourceDest.stream.getAudioTracks());
+            }
+            audioTracks = audioTracks.concat(sfxDest.stream.getAudioTracks());
+          } else {
+            audioCtx = null;
+          }
+        }
+      } catch (e) { audioCtx = null; sourceDest = null; sfxDest = null; }
+
+      // Fallback for browsers without a usable Web Audio destination.
+      if (!audioCtx && options.musicMode !== 'none' && clips[0]) {
+        try {
+          var fn = clips[0].element.captureStream || clips[0].element.mozCaptureStream || clips[0].element.webkitCaptureStream;
+          if (typeof fn === 'function') {
+            fallbackCapture = fn.call(clips[0].element);
+            if (fallbackCapture && fallbackCapture.getAudioTracks) {
+              audioTracks = audioTracks.concat(fallbackCapture.getAudioTracks());
+            }
+          }
+        } catch (e) { fallbackCapture = null; }
+      }
+    }
+
+    function connectClipAudio(element) {
+      if (!audioCtx || !sourceDest || options.musicMode === 'none') return;
+      disconnectClipAudio();
+      try {
+        var fn = element.captureStream || element.mozCaptureStream || element.webkitCaptureStream;
+        if (typeof fn !== 'function') return;
+        clipCapture = fn.call(element);
+        if (!clipCapture || !clipCapture.getAudioTracks || !clipCapture.getAudioTracks().length) return;
+        sourceNode = audioCtx.createMediaStreamSource(clipCapture);
+        sourceNode.connect(sourceDest);
+      } catch (e) { clipCapture = null; sourceNode = null; }
+    }
+
+    function disconnectClipAudio() {
+      try { if (sourceNode) sourceNode.disconnect(); } catch (e) {}
+      try { if (clipCapture && clipCapture.getTracks) stopTracks(clipCapture.getTracks()); } catch (e) {}
+      sourceNode = null;
+      clipCapture = null;
+    }
+
+    function blip(at, label) {
+      if (!audioCtx || !sfxDest) return;
+      try {
+        var osc = audioCtx.createOscillator();
+        var gain = audioCtx.createGain();
+        osc.type = /deep|low|bass/i.test(String(label)) ? 'sine' : 'triangle';
+        osc.frequency.value = /deep|low|bass/i.test(String(label)) ? 180 : 520;
+        gain.gain.setValueAtTime(0.0001, at);
+        gain.gain.exponentialRampToValueAtTime(0.07, at + 0.012);
+        gain.gain.exponentialRampToValueAtTime(0.0001, at + 0.13);
+        osc.connect(gain);
+        gain.connect(sfxDest);
+        osc.start(at);
+        osc.stop(at + 0.15);
+      } catch (e) { /* SFX are optional; never fail an export for them */ }
+    }
+
+    function scheduleSfx(start, total) {
+      if (!audioCtx || !sfxDest) return;
+      var scenes = (options.plan && options.plan.scenes) || [];
+      var cues = [];
+      scenes.forEach(function (s) {
+        if (!s || !s.sfx) return;
+        var cueT = num(s.start, 0) - start;
+        if (cueT >= 0 && cueT < total) cues.push({ t: cueT, label: s.sfx });
+      });
+      if (!cues.length) return;
+      try {
+        audioCtx.resume().then(function () {
+          var base = audioCtx.currentTime + 0.08;
+          cues.forEach(function (c) { blip(base + c.t, c.label); });
+        }).catch(noop);
+      } catch (e) { /* optional */ }
+    }
+
+    function cleanupExport() {
+      if (raf) { try { cancelRaf(raf); } catch (e) {} raf = 0; }
+      if (watchdog) { clearTimeout(watchdog); watchdog = 0; }
+      disconnectClipAudio();
+      try { if (fallbackCapture && fallbackCapture.getTracks) stopTracks(fallbackCapture.getTracks()); } catch (e) {}
+      try { if (canvasStream && canvasStream.getTracks) stopTracks(canvasStream.getTracks()); } catch (e) {}
+      clips.forEach(function (c) {
+        try { c.element.pause(); } catch (e) {}
+        try { if (c.element.currentTime > 0) c.element.currentTime = 0; } catch (e) {}
+      });
+      refs.forEach(function (r) { releaseSource(r); });
+      refs = [];
+      clips = [];
+      try { if (audioCtx) audioCtx.close(); } catch (e) {}
+      audioCtx = null; sourceDest = null; sfxDest = null;
+    }
+
+    return buildTimeline().then(function (timeline) {
+      var total = Math.max(0.05, timeline.total);
+      var start = timeline.start;
+      var overlayStart = timeline.overlayStart;
+      var first = clips[0];
 
       var canvas = doc.createElement('canvas');
       canvas.width = size.w;
@@ -822,10 +1023,11 @@
       if (!ctx) throw new Error('Canvas is not available');
       var mime = pickMime();
 
-      return seekTo(el, start).then(function () {
+      return seekTo(first.element, first.inPoint).then(function () {
         return new Promise(function (resolve, reject) {
           var settled = false;
           var chunks = [];
+          var startedAt = 0;
 
           function clearTimers() {
             if (raf) { try { cancelRaf(raf); } catch (e) {} raf = 0; }
@@ -846,7 +1048,7 @@
             resolve(new Blob(chunks, { type: (recorder && recorder.mimeType) || mime || 'video/webm' }));
           }
           function stopNow() {
-            try { el.pause(); } catch (e) {}
+            clips.forEach(function (c) { try { c.element.pause(); } catch (e) {} });
             if (recorder && recorder.state !== 'inactive') {
               try { recorder.stop(); } catch (e) { succeed(); }
             } else succeed();
@@ -855,7 +1057,6 @@
             if (signal && signal.aborted) { fail(abortError()); stopNow(); }
           }
 
-          // Canvas video track.
           try { canvasStream = canvas.captureStream(30); }
           catch (e) { fail(new Error('Canvas capture failed; the source may be cross-origin')); return; }
           if (!canvasStream || !canvasStream.getVideoTracks || !canvasStream.getVideoTracks().length) {
@@ -863,18 +1064,7 @@
             return;
           }
 
-          // Source audio track (optional). Failure here must not fail the export.
-          var audioTracks = [];
-          if (options.musicMode !== 'none') {
-            try {
-              var fn = el.captureStream || el.mozCaptureStream || el.webkitCaptureStream;
-              if (typeof fn === 'function') {
-                audioCapture = fn.call(el);
-                if (audioCapture && audioCapture.getAudioTracks) audioTracks = audioCapture.getAudioTracks() || [];
-              }
-            } catch (e) { audioCapture = null; audioTracks = []; }
-          }
-
+          setupAudio();
           var combined;
           try { combined = makeCombinedStream(canvasStream, audioTracks); }
           catch (e) { fail(e); return; }
@@ -899,24 +1089,62 @@
             if (signal.aborted) { onAbort(); return; }
           }
 
+          function frameOptions(elapsed) {
+            return Object.assign({}, options, { timelineTime: overlayStart + elapsed, plan: options.plan || null });
+          }
+
+          function switchClip(next) {
+            var prev = clips[activeIndex];
+            try { prev.element.pause(); } catch (e) {}
+            activeIndex = next;
+            var c = clips[next];
+            seekTo(c.element, c.inPoint).then(function () {
+              if (settled) return;
+              connectClipAudio(c.element);
+              return playMedia(c.element);
+            }).catch(fail);
+          }
+
           function tick() {
             if (settled) return;
-            var now = finite(el.currentTime);
-            if (el.ended || now >= end) { stopNow(); return; }
-            try { renderFrame(ctx, el, options, size.w, size.h, now); }
+            var elapsed = (Date.now() - startedAt) / 1000;
+            if (signal && signal.aborted) { onAbort(); return; }
+            if (elapsed >= total) { stopNow(); return; }
+
+            var next = activeIndex;
+            while (next < clips.length - 1 && elapsed >= clips[next].timelineStart + clips[next].len) next++;
+            if (next !== activeIndex) switchClip(next);
+
+            var c = clips[activeIndex];
+            var localTarget = c.inPoint + (elapsed - c.timelineStart);
+            var local = finite(c.element.currentTime);
+            if (Math.abs(local - localTarget) > 0.5 && localTarget < c.inPoint + c.len) {
+              try { c.element.currentTime = localTarget; } catch (e) {}
+            }
+            try { renderFrame(ctx, c.element, frameOptions(elapsed), size.w, size.h, local); }
             catch (e) { fail(e); return; }
-            report((now - start) / Math.max(0.001, end - start) * 100);
+            report(elapsed / total * 100);
             raf = rafFn(tick);
           }
 
-          // Paint one frame before recording so the output does not start black.
-          try { renderFrame(ctx, el, options, size.w, size.h, start); } catch (e) {}
-          playMedia(el).then(function () {
+          // Paint one frame and verify the canvas is readable before recording.
+          try { renderFrame(ctx, first.element, frameOptions(0), size.w, size.h, first.inPoint); }
+          catch (e) { fail(e); return; }
+          try { ctx.getImageData(0, 0, 1, 1); }
+          catch (e) {
+            fail(new Error('Cross-origin media tainted the canvas. Local export is blocked. Use blob URLs or CORS-enabled media.'));
+            return;
+          }
+
+          connectClipAudio(first.element);
+          scheduleSfx(overlayStart, total);
+          playMedia(first.element).then(function () {
             if (settled) return;
             recorder.start(100); // timeslice keeps memory bounded on phones
+            startedAt = Date.now();
             report(0);
             tick();
-            watchdog = setTimeout(stopNow, Math.max(2000, (end - start) * 1000 + 8000));
+            watchdog = setTimeout(stopNow, Math.max(2000, total * 1000 + 8000));
           }).catch(fail);
         });
       });
@@ -925,18 +1153,6 @@
       return blob;
     }).then(function (blob) { cleanupExport(); return blob; },
              function (err) { cleanupExport(); throw err; });
-
-    function cleanupExport() {
-      if (raf) { try { cancelRaf(raf); } catch (e) {} raf = 0; }
-      if (watchdog) { clearTimeout(watchdog); watchdog = 0; }
-      if (canvasStream && canvasStream.getTracks) stopTracks(canvasStream.getTracks());
-      if (audioCapture && audioCapture.getAudioTracks) stopTracks(audioCapture.getAudioTracks());
-      if (el) {
-        try { el.pause(); } catch (e) {}
-        try { if (el.currentTime > 0) el.currentTime = 0; } catch (e) {}
-      }
-      if (ref) releaseSource(ref);
-    }
   }
 
   // ---------------------------------------------------------------------------

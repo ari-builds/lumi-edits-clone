@@ -67,6 +67,23 @@ async function ensureSchema() {
     `ALTER TABLE reels ADD COLUMN IF NOT EXISTS source_url TEXT DEFAULT ''`,
     `ALTER TABLE reels ADD COLUMN IF NOT EXISTS shorts INTEGER NOT NULL DEFAULT 0`,
     `ALTER TABLE reels ADD COLUMN IF NOT EXISTS updated_at TEXT NOT NULL DEFAULT ''`,
+    `ALTER TABLE reels ADD COLUMN IF NOT EXISTS stage TEXT DEFAULT 'review'`,
+    `ALTER TABLE reels ADD COLUMN IF NOT EXISTS status_message TEXT DEFAULT ''`,
+    `ALTER TABLE reels ADD COLUMN IF NOT EXISTS plan TEXT DEFAULT ''`,
+    `ALTER TABLE reels ADD COLUMN IF NOT EXISTS storyboard TEXT DEFAULT ''`,
+    `ALTER TABLE reels ADD COLUMN IF NOT EXISTS plan_version INTEGER NOT NULL DEFAULT 0`,
+    `CREATE TABLE IF NOT EXISTS project_assets (
+       id TEXT PRIMARY KEY,
+       reel_id TEXT NOT NULL,
+       user_id TEXT,
+       kind TEXT NOT NULL DEFAULT 'raw',
+       name TEXT DEFAULT '',
+       url TEXT NOT NULL,
+       remote INTEGER NOT NULL DEFAULT 0,
+       of_index INTEGER NOT NULL DEFAULT 0,
+       analysis TEXT DEFAULT '',
+       created_at TEXT NOT NULL
+     )`,
     `CREATE TABLE IF NOT EXISTS reel_versions (
        reel_id TEXT NOT NULL,
        version INTEGER NOT NULL,
@@ -74,9 +91,11 @@ async function ensureSchema() {
        no_music_url TEXT DEFAULT '',
        poster_url TEXT DEFAULT '',
        note TEXT DEFAULT '',
+       plan_version INTEGER NOT NULL DEFAULT 0,
        created_at TEXT NOT NULL,
        PRIMARY KEY (reel_id, version)
      )`,
+    `ALTER TABLE reel_versions ADD COLUMN IF NOT EXISTS plan_version INTEGER NOT NULL DEFAULT 0`,
     `CREATE TABLE IF NOT EXISTS reel_notes (
        id TEXT PRIMARY KEY,
        reel_id TEXT NOT NULL,
@@ -255,6 +274,7 @@ function versionShape(row) {
     noMusicUrl: row.no_music_url || '',
     posterUrl: row.poster_url || '',
     note: row.note || '',
+    planVersion: Number(row.plan_version || 0),
     createdAt: row.created_at || '',
   };
 }
@@ -274,10 +294,26 @@ function noteShape(row) {
   };
 }
 
-function reelShape(row, versions = [], notes = []) {
+function assetShape(row) {
+  if (!row) return null;
+  return {
+    id: row.id || null,
+    reelId: row.reel_id || null,
+    kind: row.kind || 'raw',
+    name: row.name || '',
+    url: row.url || '',
+    remote: Boolean(row.remote),
+    ofIndex: Number(row.of_index || 0),
+    analysis: parseJson(row.analysis, null),
+    createdAt: row.created_at || '',
+  };
+}
+
+function reelShape(row, versions = [], notes = [], assets = []) {
   if (!row) return null;
   const vs = Array.isArray(versions) ? versions : [];
   const ns = Array.isArray(notes) ? notes : [];
+  const as = Array.isArray(assets) ? assets : [];
   const last = vs.length ? vs[vs.length - 1] : null;
   const lastPoster = last ? (last.posterUrl || last.poster_url || '') : '';
   const lastNoMusic = last ? (last.noMusicUrl || last.no_music_url || '') : '';
@@ -295,6 +331,12 @@ function reelShape(row, versions = [], notes = []) {
     look: row.look || 'classic',
     format: row.format || 'vertical',
     status: row.status || 'review',
+    stage: row.stage || (row.plan ? 'storyboard' : 'review'),
+    statusMessage: row.status_message || '',
+    plan: parseJson(row.plan, null),
+    planVersion: Number(row.plan_version || 0),
+    storyboard: parseJson(row.storyboard, []),
+    assets: as,
     revision: Number(row.revision || 0),
     revisionLimit: Number(row.revision_limit || 5),
     sourceKind: row.source_kind || '',
@@ -312,5 +354,5 @@ function reelShape(row, versions = [], notes = []) {
 
 module.exports = {
   query, ready, hashPassword, verifyPassword, newId, json, parseBody, getToken, userFromReq, cors,
-  parseJson, versionShape, noteShape, reelShape,
+  parseJson, versionShape, noteShape, assetShape, reelShape,
 };

@@ -56,8 +56,13 @@ async function seedReelsIfEmpty(query) {
   if (rows[0] && rows[0].n === 0) {
     for (const r of REEL_SEED) {
       await query(
-        'INSERT INTO reels (id, user_id, username, video_url, caption, style, likes, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (id) DO NOTHING',
-        [r.id, 'seed', r.user, r.videoUrl, r.caption, r.style, r.likes, new Date().toISOString()]
+        `INSERT INTO reels
+           (id, user_id, username, video_url, caption, style, likes, created_at,
+            status, stage, status_message, updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'done','done',$9,$8)
+         ON CONFLICT (id) DO NOTHING`,
+        [r.id, 'seed', r.user, r.videoUrl, r.caption, r.style, r.likes,
+          new Date().toISOString(), 'Sample reel from the public demo catalog.']
       );
     }
   }
@@ -68,15 +73,22 @@ async function loadReels(query) {
   const rows = await query('SELECT * FROM reels ORDER BY created_at DESC');
   const versionRows = await query('SELECT * FROM reel_versions ORDER BY reel_id ASC, version ASC');
   const noteRows = await query('SELECT * FROM reel_notes ORDER BY reel_id ASC, created_at ASC');
+  const assetRows = await query('SELECT * FROM project_assets ORDER BY reel_id ASC, of_index ASC, created_at ASC');
   const versionsByReel = {};
   const notesByReel = {};
+  const assetsByReel = {};
   for (const v of versionRows) {
     (versionsByReel[v.reel_id] || (versionsByReel[v.reel_id] = [])).push(db.versionShape(v));
   }
   for (const n of noteRows) {
     (notesByReel[n.reel_id] || (notesByReel[n.reel_id] = [])).push(db.noteShape(n));
   }
-  return rows.map((r) => db.reelShape(r, versionsByReel[r.id] || [], notesByReel[r.id] || []));
+  for (const a of assetRows) {
+    (assetsByReel[a.reel_id] || (assetsByReel[a.reel_id] = [])).push(db.assetShape(a));
+  }
+  return rows.map((r) => db.reelShape(
+    r, versionsByReel[r.id] || [], notesByReel[r.id] || [], assetsByReel[r.id] || []
+  ));
 }
 
 async function loadConversations(query) {

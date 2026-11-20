@@ -90,7 +90,7 @@ const DEFAULT_CATALOG = {
   ],
   voices: [
     { id: 'none', name: 'No', desc: 'No voiceover.' },
-    { id: 'ai', name: 'Yes, AI voiceover', desc: 'Generate a read.' },
+    { id: 'ai', name: 'AI voiceover (preference only)', desc: 'Saved to your brief; no voice is generated locally.' },
     { id: 'upload', name: 'Yes, upload', desc: 'I will send audio.' },
     { id: 'record', name: 'Yes, record', desc: 'Record in Lumi.' },
   ],
@@ -116,12 +116,34 @@ const BRIEF_FIELDS = [
   { key: 'hookStyle', label: 'Hook style', options: ['Control', 'Wait-for', 'Flash-forward', 'Cold open', 'Series pitch'] },
   { key: 'background', label: 'Background', catalog: 'backgrounds' },
   { key: 'music', label: 'Music', options: ['A song I name', 'Trending music', 'You decide', 'No music'] },
-  { key: 'voiceover', label: 'Voiceover', options: ['No', 'Yes AI voiceover', 'Yes upload', 'Yes record'] },
+  { key: 'voiceover', label: 'Voiceover', options: ['No', 'AI voiceover (preference only)', 'Yes upload', 'Yes record'] },
   { key: 'length', label: 'Length', options: ['15–30 seconds', '30–45 seconds', '45–60 seconds', '60+ seconds'] },
   { key: 'grade', label: 'Color / grade', catalog: 'grades' },
 ];
 
 const SUPPORTED_LINK_HINT = 'YouTube · Instagram · TikTok · Vimeo · Google Drive · Dropbox';
+
+const NOTE_KINDS = [
+  { id: 'general', label: 'General' },
+  { id: 'storyboard', label: 'Storyboard' },
+  { id: 'caption', label: 'Caption' },
+  { id: 'broll', label: 'B-roll' },
+  { id: 'motion', label: 'Motion' },
+  { id: 'sfx', label: 'SFX' },
+];
+
+const STAGE_LABELS = {
+  intake: 'Intake',
+  assets: 'Assets',
+  storyboard: 'Storyboard',
+  approved: 'Approved',
+  editing: 'Editing',
+  review: 'Review',
+  done: 'Done',
+  waiting: 'Waiting',
+  local_only: 'Local only',
+  unknown: 'Unknown',
+};
 
 const app = {
   state: {
@@ -218,6 +240,7 @@ const app = {
       else if (name === 'download') this.downloadReel(id);
       else if (name === 'raw') this.openRawClips(id);
       else if (name === 'resolve-note') this.resolveNote(id, act.dataset.note || '');
+      else if (name === 'approve-storyboard') this.approveStoryboard(id);
       else if (name === 'copypost') this.copyText(id);
     });
   },
@@ -264,11 +287,19 @@ const app = {
   },
 
   // Presigned PUT upload; returns permanent public URL.
-  async uploadBlob(blob, fileName) {
+  // meta maps to the existing upload bookkeeping fields (kind/batch/ofIndex/reelId).
+  async uploadBlob(blob, fileName, meta = {}) {
     const fileType = blob.type || 'application/octet-stream';
     const signed = await this.request('/upload', {
       method: 'POST',
-      body: { fileName: fileName || 'upload.mp4', fileType },
+      body: {
+        fileName: fileName || 'upload.mp4',
+        fileType,
+        kind: meta.kind || 'raw',
+        batch: meta.batch || '',
+        ofIndex: meta.ofIndex || 0,
+        reelId: meta.reelId || '',
+      },
     });
     if (!signed || !signed.uploadUrl || !signed.publicUrl) {
       throw new Error('Upload service unavailable');
@@ -676,6 +707,7 @@ const app = {
     if (data.account && typeof data.account === 'object') this.state.account = data.account;
     if (data.price && typeof data.price === 'object') this.state.price = Object.assign({ reel: 20, monthly: 60, monthlyReels: 10 }, data.price);
 
+    this.renderCapabilityBanner();
     this.renderReels();
     this.renderStyles();
     this.renderConversations();
@@ -746,16 +778,35 @@ const app = {
   visibleReels() {
     const all = this.state.reels || [];
     if (this.state.reelFilter === 'all') return all;
-    if (this.state.reelFilter === 'review') return all.filter((r) => this.normalStatus(r) === 'review');
+    if (this.state.reelFilter === 'review') {
+      return all.filter((r) => ['review', 'approved', 'storyboard'].includes(this.normalStatus(r))
+        || ['storyboard', 'approved'].includes(String(r && r.stage || '')));
+    }
     const mine = all.filter((r) => this.isMine(r));
     return mine.length ? mine : all; // demo feed if you have none yet
   },
 
   normalStatus(reel) {
-    return String((reel && (reel.status || reel.state)) || 'done').toLowerCase();
+    return String((reel && (reel.status || reel.state)) || '').toLowerCase() || 'unknown';
+  },
+
+  renderCapabilityBanner() {
+    const el = document.getElementById('capability-banner');
+    if (!el) return;
+    const canExport = this.editorCan('exportVideo');
+    el.innerHTML = `
+      <div class="cap-row">
+        <span class="cap-dot ${canExport ? 'ready' : 'limited'}"></span>
+        <div class="grow">
+          <strong>${canExport ? 'On-device tools ready' : 'Local export unavailable in this browser'}</strong>
+          <p>Planning, reference analysis, storyboards, and feedback run locally in this browser. ${canExport ? 'Exports are rendered locally with MediaRecorder.' : 'You can still create a plan and notes, but no video will be rendered here.'}</p>
+          <p class="tiny">No hosted LLM, remote renderer, stock downloads, or AI voiceover. Link-only reels stay <em>waiting</em> because their media is never downloaded.</p>
+        </div>
+      </div>`;
   },
 
   renderReels() {
+    this.renderCapabilityBanner();
     const feed = document.getElementById('reels-feed');
     const empty = document.getElementById('reels-empty');
     const title = document.querySelector('.reels-toolbar .view-title');
@@ -778,7 +829,9 @@ const app = {
     const status = this.normalStatus(r);
     const cover = this.reelPosterUrl(r);
     const src = this.reelVideoUrl(r);
-    const reviewish = status === 'review' || status === 'done';
+    const reviewish = ['review', 'done', 'approved', 'editing', 'storyboard', 'local_only', 'unknown'].includes(status);
+    const stage = String(r.stage || '');
+    const stageLabel = STAGE_LABELS[stage] || STAGE_LABELS[status] || stage;
     const caption = String(r.caption || r.brief || r.title || '');
     const version = `v${this.reelVersion(r)}`;
     const revs = this.reelRevisions(r);
@@ -805,7 +858,8 @@ const app = {
         ${media}
         <div class="reel-shade"></div>
         <div class="reel-topline">
-          <span class="badge ${this.esc(status)}">${this.esc(status)}</span>
+          <span class="badge ${this.esc(status)}">${this.esc(stageLabel || status)}</span>
+          ${r.statusMessage ? `<span class="status-message-pill" title="${this.esc(r.statusMessage)}">i</span>` : ''}
           <span class="sound-pill" id="sound-${id}">♪ Sound off</span>
         </div>
         <div class="reel-actions">
@@ -816,7 +870,8 @@ const app = {
           <div class="user">${this.esc(r.user || 'you')}</div>
           ${r.title ? `<div class="title">${this.esc(r.title)}</div>` : ''}
           <div class="text">${this.esc(caption)}</div>
-          <div class="meta">Look: ${this.esc(r.look || r.style || 'classic')} · ${version} · ${this.esc(revs)} revisions</div>
+          <div class="meta">Look: ${this.esc(r.look || r.style || 'classic')} · ${version} · ${this.esc(revs)} revisions${r.planVersion ? ` · plan v${this.esc(r.planVersion)}` : ''}</div>
+          ${r.statusMessage ? `<div class="status-note">${this.esc(r.statusMessage)}</div>` : ''}
         </div>
         ${buttons.length ? `<div class="reel-buttons">${buttons.join('')}</div>` : ''}
       </article>`;
@@ -914,7 +969,10 @@ const app = {
   openRawClips(reelId) {
     const reel = this.state.reels.find((r) => String(r.id) === String(reelId));
     if (!reel) return;
-    const raw = [...(Array.isArray(reel.rawUrls) ? reel.rawUrls : []), ...(Array.isArray(reel.rawClips) ? reel.rawClips : [])]
+    const assetUrls = (Array.isArray(reel.assets) ? reel.assets : [])
+      .filter((a) => a && a.kind === 'raw' && a.url)
+      .map((a) => a.url);
+    const raw = [...assetUrls, ...(Array.isArray(reel.rawUrls) ? reel.rawUrls : []), ...(Array.isArray(reel.rawClips) ? reel.rawClips : [])]
       .map((u) => this.safeUrl(u)).filter(Boolean);
     if (!raw.length) { this.toast('No raw clips attached to this reel.'); return; }
     this.showSheet('Raw clips', raw.map((u, i) => `
@@ -937,8 +995,15 @@ const app = {
     const cap = this.reelRevisionLimit(reel);
     const used = this.reelRevisions(reel);
     const src = this.reelVideoUrl(reel);
+    const hasPlan = !!(reel.plan || (Array.isArray(reel.storyboard) && reel.storyboard.length));
+    const needsApproval = hasPlan && reel.stage !== 'approved';
 
     const body = `
+      ${hasPlan ? `<div class="plan-banner">
+        <strong>On-device plan v${this.esc(reel.planVersion || 1)}</strong>
+        <span>${this.esc(reel.stage || 'storyboard')}</span>
+        <p>${needsApproval ? 'Export is locked until this storyboard is approved.' : 'Storyboard approved. Local export is unlocked.'}</p>
+      </div>` : ''}
       <div class="revision-meter">Revisions: <strong>${this.esc(used)} of ${this.esc(cap)}</strong> used. Ask for changes before approving.</div>
       ${src ? `<video id="review-video" class="review-video" src="${this.esc(src)}" muted playsinline controls preload="metadata"></video>` : '<p class="muted">No video preview in this deployment yet.</p>'}
       <div class="spread" style="margin-top:10px">
@@ -949,6 +1014,12 @@ const app = {
       <div class="field">
         <label>Note at current timecode</label>
         <input type="text" id="note-text" placeholder="e.g. tighten the hook, fix caption typo" />
+      </div>
+      <div class="field">
+        <label>Feedback kind</label>
+        <select id="note-kind">
+          ${NOTE_KINDS.map((k) => `<option value="${k.id}">${k.label}</option>`).join('')}
+        </select>
       </div>
       <div class="row">
         <button class="btn btn-primary grow" id="add-note">Add note</button>
@@ -963,6 +1034,10 @@ const app = {
       <div id="notes-list">${this.notesHtml(reelId, notes)}</div>`;
 
     const foot = `
+      ${hasPlan ? `<div class="btn-row">
+        <button class="btn btn-secondary grow" id="apply-feedback">Apply feedback to plan</button>
+        ${needsApproval ? '<button class="btn btn-primary grow" id="approve-storyboard">Approve storyboard</button>' : ''}
+      </div>` : ''}
       <div class="btn-row">
         <button class="btn btn-danger" id="request-changes">Request changes</button>
         <button class="btn btn-primary" id="approve-reel">Approve</button>
@@ -982,6 +1057,7 @@ const app = {
           <div class="spread">
             <div>
               ${n.t != null ? `<span class="note-time">${this.esc(this.fmtTime(n.t))}${n.tEnd != null ? `–${this.esc(this.fmtTime(n.tEnd))}` : ''}</span>` : ''}
+              <span class="note-kind">${this.esc((NOTE_KINDS.find((k) => k.id === n.kind) || { label: n.kind || 'General' }).label)}</span>
               <span>${this.esc(n.text || '')}</span>
             </div>
             ${resolved ? '<span class="status-pill paid">Resolved</span>'
@@ -1030,7 +1106,8 @@ const app = {
       const text = (input?.value || '').trim();
       if (!text) { this.toast('Write a note first.'); return; }
       const payload = Object.assign(
-        { text, t: markRange ? markRange.t : current, status: 'open', version: this.reelVersion(reel), idem: this.idem() },
+        { text, kind: overlay.querySelector('#note-kind')?.value || 'general', t: markRange ? markRange.t : current,
+          status: 'open', version: this.reelVersion(reel), idem: this.idem() },
         markRange ? { tEnd: markRange.tEnd } : {}
       );
       markRange = null;
@@ -1055,11 +1132,12 @@ const app = {
         return;
       }
       try {
-        await this.request(`/reels/${reel.id}/review`, {
+        const data = await this.request(`/reels/${reel.id}/review`, {
           method: 'POST',
           body: { action, version: this.reelVersion(reel), text, idem: this.idem() },
         });
-        reel.status = action === 'approve' ? 'done' : 'editing';
+        if (data.reel) Object.assign(reel, data.reel);
+        else reel.status = action === 'approve' ? 'done' : 'editing';
         reel.overallNotes = text;
         this.closeSheet();
         this.toast(action === 'approve' ? 'Approved.' : 'Changes requested.');
@@ -1071,6 +1149,66 @@ const app = {
 
     overlay.querySelector('#approve-reel')?.addEventListener('click', () => submitReview('approve'));
     overlay.querySelector('#request-changes')?.addEventListener('click', () => submitReview('changes'));
+
+    overlay.querySelector('#approve-storyboard')?.addEventListener('click', async (e) => {
+      const btn = e.currentTarget;
+      btn.disabled = true;
+      try {
+        const data = await this.request(`/reels/${reel.id}/review`, {
+          method: 'POST',
+          body: { action: 'approve-storyboard', version: this.reelVersion(reel), text: 'Storyboard approved locally.', idem: this.idem() },
+        });
+        if (data.reel) Object.assign(reel, data.reel);
+        this.toast('Storyboard approved. Local export is unlocked.');
+        this.closeSheet();
+        this.loadReels();
+      } catch (err) {
+        this.toast(err.message || 'Could not approve storyboard');
+        btn.disabled = false;
+      }
+    });
+
+    overlay.querySelector('#apply-feedback')?.addEventListener('click', async (e) => {
+      const btn = e.currentTarget;
+      btn.disabled = true;
+      btn.textContent = 'Applying…';
+      try {
+        const notePayload = notes.map((n) => ({
+          t: Number(n.t || 0),
+          kind: n.kind || 'general',
+          text: String(n.text || ''),
+        })).filter((n) => n.text);
+        const overall = (overlay.querySelector('#overall-notes')?.value || '').trim();
+        if (overall) notePayload.push({ t: 0, kind: 'general', text: overall });
+        const data = await this.request(`/reels/${reel.id}/plan`, {
+          method: 'PATCH',
+          body: { notes: notePayload, overall: overlay.querySelector('#overall-notes')?.value || '', source: 'local' },
+        });
+        if (data.reel) Object.assign(reel, data.reel);
+        this.toast(`Plan v${reel.planVersion || 2} saved locally. Re-approve before exporting.`);
+        this.closeSheet();
+        this.loadReels();
+      } catch (err) {
+        this.toast(err.message || 'Could not revise plan locally');
+        btn.disabled = false;
+        btn.textContent = 'Apply feedback to plan';
+      }
+    });
+  },
+
+  async approveStoryboard(reelId) {
+    try {
+      const data = await this.request(`/reels/${reelId}/review`, {
+        method: 'POST',
+        body: { action: 'approve-storyboard', version: 1, text: 'Approved from reel card.', idem: this.idem() },
+      });
+      const reel = this.state.reels.find((r) => String(r.id) === String(reelId));
+      if (reel && data.reel) Object.assign(reel, data.reel);
+      this.toast('Storyboard approved. Local export is unlocked.');
+      this.loadReels();
+    } catch (e) {
+      this.toast(e.message || 'Could not approve storyboard');
+    }
   },
 
   async resolveNote(reelId, noteId) {
@@ -1220,6 +1358,10 @@ const app = {
         cta: 'Follow for more',
       },
       brief: '',
+      referenceAssets: [],
+      storyboard: [],
+      plan: null,
+      storyboardApproved: false,
       exporting: false,
       progress: 0,
       done: false,
@@ -1236,23 +1378,29 @@ const app = {
     if (!root) return;
     const n = this.state.newReel;
     if (n.done) { root.innerHTML = this.completionHtml(); return; }
+    if (n.step === 4 && !n.plan) n.plan = this.buildLocalPlan();
     root.innerHTML = `
       <div class="stepper-wrap">
         <div class="stepper-head">
           <h2>New reel</h2>
-          <span class="step-count">Step ${n.step} of 3</span>
+          <span class="step-count">Step ${n.step} of 4</span>
         </div>
-        <div class="stepper-progress"><i style="width:${(n.step / 3) * 100}%"></i></div>
+        <div class="stepper-progress"><i style="width:${(n.step / 4) * 100}%"></i></div>
         <div class="step-dots">
           <span class="${n.step >= 1 ? 'on' : ''}"></span>
           <span class="${n.step >= 2 ? 'on' : ''}"></span>
           <span class="${n.step >= 3 ? 'on' : ''}"></span>
+          <span class="${n.step >= 4 ? 'on' : ''}"></span>
         </div>
-        ${n.step === 1 ? this.stepClipsHtml() : n.step === 2 ? this.stepTitleHtml() : this.stepBriefHtml()}
+        ${n.step === 1 ? this.stepClipsHtml()
+          : n.step === 2 ? this.stepTitleHtml()
+          : n.step === 3 ? this.stepBriefHtml()
+          : this.stepStoryboardHtml()}
       </div>`;
     if (n.step === 1) this.bindStepClips();
     if (n.step === 2) this.bindStepTitle();
     if (n.step === 3) this.bindStepBrief();
+    if (n.step === 4) this.bindStepStoryboard();
   },
 
   goStep(step) {
@@ -1608,6 +1756,12 @@ const app = {
           </select>
         </div>
         <div class="field">
+          <label>Style reference files (images or short video clips)</label>
+          <input type="file" id="reference-file-input" accept="image/*,video/*" multiple class="input" />
+          <div class="hint">Analyzed locally in this browser with canvas pixel sampling. Files are never uploaded for analysis.</div>
+        </div>
+        <div id="reference-list" class="reference-list">${this.referenceAssetsHtml()}</div>
+        <div class="field">
           <label>Hook / opening line</label>
           <input type="text" data-brief-key="cta" placeholder="Follow for more" value="${this.esc(o.cta || '')}" />
         </div>
@@ -1628,7 +1782,7 @@ const app = {
 
       <div class="btn-row" style="margin-top:16px">
         <button class="btn btn-secondary" onclick="app.goStep(2)">Back</button>
-        <button class="btn btn-primary" id="create-reel">Create reel</button>
+        <button class="btn btn-primary" id="brief-next">Next: Storyboard</button>
       </div>`;
   },
 
@@ -1650,7 +1804,130 @@ const app = {
     document.getElementById('path-last')?.addEventListener('click', () => this.applyPath('last'));
     document.getElementById('path-words')?.addEventListener('click', () => this.applyPath('words'));
 
-    document.getElementById('create-reel')?.addEventListener('click', () => this.createReel());
+    document.getElementById('reference-file-input')?.addEventListener('change', async (e) => {
+      const files = Array.from(e.target.files || []);
+      for (const file of files) {
+        const asset = {
+          kind: /^video\//i.test(file.type) ? 'reference' : 'style',
+          name: file.name,
+          url: URL.createObjectURL(file),
+          file,
+          analysis: null,
+          analyzing: true,
+        };
+        n.referenceAssets.push(asset);
+        const list = document.getElementById('reference-list');
+        if (list) list.innerHTML = this.referenceAssetsHtml();
+        try {
+          asset.analysis = await this.analyzeReferenceFile(file);
+        } catch (err) {
+          asset.analysis = {
+            method: 'local canvas sampling failed',
+            palette: [],
+            brightness: null,
+            note: 'This reference could not be sampled locally. It is still attached, but no style colors were inferred.',
+          };
+        } finally {
+          asset.analyzing = false;
+          const updated = document.getElementById('reference-list');
+          if (updated) updated.innerHTML = this.referenceAssetsHtml();
+        }
+      }
+      e.target.value = '';
+    });
+
+    document.getElementById('brief-next')?.addEventListener('click', () => {
+      const ta = document.getElementById('brief-text');
+      if (ta) n.brief = ta.value.trim();
+      if (!n.brief) { this.toast('Add a brief before generating the storyboard.'); return; }
+      n.plan = this.buildLocalPlan();
+      this.goStep(4);
+    });
+  },
+
+  referenceAssetsHtml() {
+    const list = this.state.newReel.referenceAssets || [];
+    if (!list.length) return '<p class="muted tiny">No style references attached. You can continue without one.</p>';
+    return list.map((a, i) => {
+      const colors = (a.analysis?.palette || []).map((c) => `<i style="background:${this.esc(this.safeColor(c, '#777'))}"></i>`).join('');
+      return `
+        <div class="reference-item">
+          <div class="spread">
+            <strong>${this.esc(a.name || `Reference ${i + 1}`)}</strong>
+            ${a.analyzing ? '<span class="status-pill">Analyzing…</span>' : '<span class="status-pill paid">Analyzed locally</span>'}
+          </div>
+          ${a.analysis?.note ? `<p class="tiny">${this.esc(a.analysis.note)}</p>` : ''}
+          ${colors ? `<div class="swatches">${colors}</div>` : ''}
+        </div>`;
+    }).join('');
+  },
+
+  analyzeReferenceFile(file) {
+    const isVideo = /^video\//i.test(file && file.type || '');
+    const url = URL.createObjectURL(file);
+    const source = isVideo ? document.createElement('video') : new Image();
+    if (isVideo) {
+      source.muted = true;
+      source.preload = 'auto';
+      source.playsInline = true;
+      source.src = url;
+    } else {
+      source.src = url;
+    }
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => { URL.revokeObjectURL(url); reject(new Error('Reference analysis timed out')); }, 12000);
+      const sample = () => {
+        try {
+          const canvas = document.createElement('canvas');
+          canvas.width = 32;
+          canvas.height = 32;
+          const ctx = canvas.getContext('2d', { willReadFrequently: true });
+          if (!ctx) throw new Error('Canvas unavailable');
+          ctx.drawImage(source, 0, 0, 32, 32);
+          const data = ctx.getImageData(0, 0, 32, 32).data;
+          const buckets = new Map();
+          let brightness = 0;
+          for (let i = 0; i < data.length; i += 4) {
+            const r = data[i], g = data[i + 1], b = data[i + 2];
+            brightness += (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+            const key = `${Math.round(r / 48)}-${Math.round(g / 48)}-${Math.round(b / 48)}`;
+            const hit = buckets.get(key) || { count: 0, r: 0, g: 0, b: 0 };
+            hit.count++; hit.r += r; hit.g += g; hit.b += b;
+            buckets.set(key, hit);
+          }
+          const palette = [...buckets.values()]
+            .sort((a, b) => b.count - a.count)
+            .slice(0, 4)
+            .map((h) => {
+              const hex = (v) => Math.round(v / h.count).toString(16).padStart(2, '0');
+              return `#${hex(h.r)}${hex(h.g)}${hex(h.b)}`;
+            });
+          const avg = brightness / (data.length / 4);
+          clearTimeout(timeout);
+          URL.revokeObjectURL(url);
+          resolve({
+            method: 'local canvas pixel sampling',
+            palette,
+            brightness: Math.round(avg * 100) / 100,
+            note: `${isVideo ? 'Frame sampled from a reference video' : 'Pixels sampled from a reference image'} locally; no upload, no remote inference.`,
+          });
+        } catch (err) {
+          clearTimeout(timeout);
+          URL.revokeObjectURL(url);
+          reject(err);
+        }
+      };
+      if (isVideo) {
+        source.addEventListener('loadeddata', () => {
+          source.currentTime = Math.min(0.2, Math.max(0, (source.duration || 0.4) / 2));
+        }, { once: true });
+        source.addEventListener('seeked', sample, { once: true });
+        source.addEventListener('error', () => { clearTimeout(timeout); URL.revokeObjectURL(url); reject(new Error('Could not read reference video')); }, { once: true });
+      } else {
+        source.onload = sample;
+        source.onerror = () => { clearTimeout(timeout); URL.revokeObjectURL(url); reject(new Error('Could not read reference image')); };
+      }
+    });
   },
 
   applyPath(path) {
@@ -1733,6 +2010,127 @@ const app = {
     ].join('\n');
   },
 
+  buildLocalPlan() {
+    const n = this.state.newReel;
+    const o = n.opts;
+    const brief = n.brief || this.buildBrief();
+    const visual = n.sources.filter((s) => s.kind === 'file' || s.kind === 'camera');
+    const lead = visual[0];
+    const start = Math.max(0, Number(n.trim.start) || 0);
+    const rawEnd = Number(n.trim.end) || Number(lead?.duration) || 30;
+    const end = Math.max(start + 3, rawEnd);
+    const span = end - start;
+    const count = Math.max(3, Math.min(8, Math.round(span / 5)));
+    const step = span / count;
+    const timedCaptions = this.parseCaptions(brief);
+    const words = String(n.title || '').trim().split(/\s+/).filter(Boolean);
+    const styleNotes = (n.referenceAssets || []).map((a) => a.analysis?.note).filter(Boolean);
+    const palette = [...new Set((n.referenceAssets || []).flatMap((a) => (a.analysis?.palette || [])))];
+    if (palette.length) styleNotes.push(`Reference palette sampled locally: ${palette.join(', ')}.`);
+    if (o.referenceUrl) styleNotes.push(`Reference link saved (not fetched): ${o.referenceUrl}`);
+    if (n.link?.url) styleNotes.push(`Link source saved, no local media: ${n.link.url}`);
+    const visualBase = `${this.optionName('templates', o.look)} look · ${o.hookStyle} hook · ${o.intensity} pacing`;
+    const scenes = Array.from({ length: count }, (_, i) => {
+      const t = start + i * step;
+      const timed = timedCaptions.filter((c) => c.t >= t && c.t < t + step);
+      const caption = timed.length
+        ? timed.map((c) => c.text).join(' / ')
+        : (words[i % Math.max(1, words.length)] || n.title || `Scene ${i + 1}`);
+      return {
+        index: i,
+        start: Math.round(t * 100) / 100,
+        duration: Math.round(step * 100) / 100,
+        sourceIndex: visual.length ? i % visual.length : null,
+        caption: String(caption).slice(0, 240),
+        visual: `${visualBase}; scene ${i + 1} of ${count}`,
+        motion: o.motion === 'none' ? null : `Apply ${this.optionName('motion', o.motion)} during this window`,
+        sfx: /no music/i.test(o.music) ? null : 'Optional subtle transition tone from local Web Audio',
+        broll: o.vfx === 'none' ? null : `${this.optionName('vfx', o.vfx)} treatment; no stock media is downloaded`,
+      };
+    });
+    return {
+      planner: 'on-device AI planner',
+      method: 'deterministic local rules from brief, trim range, and locally sampled references',
+      createdAt: new Date().toISOString(),
+      title: n.title,
+      brief: brief.slice(0, 2000),
+      sceneCount: scenes.length,
+      estimatedDuration: Math.round(span * 100) / 100,
+      sourceSummary: visual.map((s, i) => `${i + 1}. ${s.name || 'clip'} (${this.fmtTime(s.duration || 0)})`),
+      styleNotes,
+      scenes,
+    };
+  },
+
+  stepStoryboardHtml() {
+    const n = this.state.newReel;
+    const plan = n.plan || (n.plan = this.buildLocalPlan());
+    const scenes = Array.isArray(plan.scenes) ? plan.scenes : [];
+    return `
+      <div class="storyboard-banner">
+        <div class="spread"><strong>On-device AI planner</strong><span class="status-pill paid">${this.esc(plan.method || 'deterministic local rules')}</span></div>
+        <p>${scenes.length} scenes · ${this.esc(this.fmtTime(plan.estimatedDuration || 0))} planned · captions, motion, B-roll timing, and SFX cues are instructions for the local renderer.</p>
+        ${(plan.styleNotes || []).length ? `<p class="tiny">${this.esc(plan.styleNotes.join(' '))}</p>` : ''}
+      </div>
+      <div class="storyboard-grid">
+        ${scenes.map((s, i) => `
+          <article class="story-card">
+            <div class="story-card-head"><span>Scene ${i + 1}</span><span>${this.esc(this.fmtTime(s.start))} · ${this.esc(this.fmtTime(s.duration))}</span></div>
+            <p class="story-visual">${this.esc(s.visual || '')}</p>
+            <div class="field">
+              <label>Caption</label>
+              <input type="text" data-scene-caption="${i}" value="${this.esc(s.caption || '')}" />
+            </div>
+            <p class="tiny"><strong>Motion:</strong> ${this.esc(s.motion || 'None')}</p>
+            <p class="tiny"><strong>B-roll:</strong> ${this.esc(s.broll || 'None')}</p>
+            <p class="tiny"><strong>SFX:</strong> ${this.esc(s.sfx || 'None')}</p>
+          </article>`).join('')}
+      </div>
+      <div class="approval-box ${n.storyboardApproved ? 'approved' : ''}">
+        <div class="spread"><strong>${n.storyboardApproved ? 'Storyboard approved' : 'Approve this storyboard'}</strong><span class="status-pill ${n.storyboardApproved ? 'paid' : ''}">${n.storyboardApproved ? 'Unlocked' : 'Export locked'}</span></div>
+        <p class="tiny">Approval is recorded on the reel before any local export is accepted. No AI-generated imagery, voice, or stock footage is implied.</p>
+        <div class="btn-row" style="margin-top:10px">
+          <button class="btn btn-secondary" id="regen-plan">Regenerate locally</button>
+          <button class="btn ${n.storyboardApproved ? 'btn-ghost' : 'btn-primary'}" id="approve-plan">${n.storyboardApproved ? 'Approved ✓' : 'Approve storyboard'}</button>
+        </div>
+      </div>
+      <div class="btn-row" style="margin-top:16px">
+        <button class="btn btn-secondary" onclick="app.goStep(3)">Back</button>
+        <button class="btn btn-primary" id="create-reel" ${n.storyboardApproved ? '' : 'disabled'}>Create reel</button>
+      </div>`;
+  },
+
+  bindStepStoryboard() {
+    const n = this.state.newReel;
+    document.querySelectorAll('[data-scene-caption]').forEach((el) => {
+      el.addEventListener('input', () => {
+        const i = Number(el.dataset.sceneCaption);
+        if (n.plan?.scenes?.[i]) n.plan.scenes[i].caption = el.value;
+      });
+    });
+    document.getElementById('regen-plan')?.addEventListener('click', () => {
+      n.plan = this.buildLocalPlan();
+      n.storyboardApproved = false;
+      this.renderNewReel();
+      this.toast('Storyboard regenerated locally. Approve it again.');
+    });
+    document.getElementById('approve-plan')?.addEventListener('click', () => {
+      n.storyboardApproved = true;
+      this.renderNewReel();
+      this.toast('Storyboard approved locally. Creating the reel will record this approval.');
+    });
+    document.getElementById('create-reel')?.addEventListener('click', () => this.createReel());
+  },
+
+  editorCaptionText(reel, plan) {
+    if (Array.isArray(reel.captions) && reel.captions.length) {
+      return reel.captions.map((c) => `${this.fmtTime(c.t)} ${c.text || ''}`).join('\n');
+    }
+    const scenes = (plan && plan.scenes) || (Array.isArray(reel.storyboard) ? reel.storyboard : []);
+    return scenes.filter((s) => s && s.caption)
+      .map((s) => `${this.fmtTime(s.start)} ${s.caption}`).join('\n');
+  },
+
   parseCaptions(brief) {
     const out = [];
     String(brief || '').split('\n').forEach((line) => {
@@ -1746,12 +2144,13 @@ const app = {
     return out.slice(0, 80);
   },
 
-  /* ---------- Create reel (real pipeline) ---------- */
+  /* ---------- Create reel (ingest + approved plan only; export is a separate step) ---------- */
   async createReel() {
     const n = this.state.newReel;
     if (n.exporting) return;
     if (!n.sources.length) { this.toast('Add at least one clip or link.'); return; }
     if (!n.title.trim()) { this.toast('Required Please enter the title of your video'); return; }
+    if (!n.storyboardApproved || !n.plan) { this.toast('Approve the storyboard before creating the reel.'); return; }
     const briefText = (document.getElementById('brief-text')?.value || n.brief || this.buildBrief()).trim();
     if (!briefText) { this.toast('Add a brief before creating the reel.'); return; }
     n.brief = briefText;
@@ -1760,13 +2159,14 @@ const app = {
     const links = n.sources.filter((s) => s.kind === 'link');
     const lead = visual[0] || null;
     const sourceKind = visual.length ? (lead.kind === 'camera' ? 'camera' : 'file') : 'link';
+    const plan = n.plan || this.buildLocalPlan();
+    const storyboard = plan.scenes.slice();
 
     const payload = {
       title: n.title,
       brief: briefText,
       look: n.opts.look || this.state.draft.look || 'classic',
       format: n.format,
-      status: 'received',
       sourceKind,
       sourceUrl: lead ? (lead.url || '') : (links[0]?.url || ''),
       shorts: links[0]?.shorts || 0,
@@ -1776,6 +2176,10 @@ const app = {
       caption: briefText.slice(0, 240),
       style: n.opts.look || 'classic',
       rawUrls: [],
+      referenceUrls: [],
+      assets: [],
+      plan,
+      storyboard,
       styleOptions: Object.assign({}, n.opts),
     };
 
@@ -1785,7 +2189,6 @@ const app = {
     if (btn) { btn.disabled = true; btn.textContent = 'Creating…'; }
 
     try {
-      // a) Draft + brief intent
       this.state.draft = Object.assign({}, this.state.draft, {
         title: n.title, brief: briefText, look: payload.look, format: n.format,
       });
@@ -1797,7 +2200,23 @@ const app = {
         });
       } catch (e) { /* intent logging is best-effort */ }
 
-      // d) Link-only: honest fallback, no pretend download.
+      // Style references: remote links are recorded honestly; local files keep
+      // their locally sampled analysis. No reference media is sent for inference.
+      if (n.opts.referenceUrl && /^https?:\/\//i.test(n.opts.referenceUrl)) {
+        payload.referenceUrls.push(n.opts.referenceUrl);
+        payload.assets.push({ kind: 'reference', name: 'Reference link', url: n.opts.referenceUrl, remote: true, analysis: null });
+      }
+      for (const a of n.referenceAssets || []) {
+        payload.assets.push({
+          kind: a.kind || 'reference',
+          name: a.name || 'reference',
+          url: '',
+          remote: false,
+          analysis: a.analysis || null,
+        });
+      }
+
+      // Link-only: honest fallback, no pretend download or edit.
       if (!lead) {
         payload.status = 'waiting';
         payload.videoUrl = '';
@@ -1813,66 +2232,60 @@ const app = {
         return;
       }
 
-      // c) Local export path
-      let videoUrl = '';
-      let exported = false;
-      if (this.editorCan('exportVideo')) {
-        this.setCreateProgress(true, 12, 'Exporting locally…');
-        const E = this.editor();
-        const start = Math.max(0, Number(n.trim.start) || 0);
-        const end = Math.max(start + 0.5, Number(n.trim.end) || (lead.duration || start + 5));
-        const musicMode = /no music/i.test(n.opts.music) ? 'none' : 'source';
-        const controller = new AbortController();
-        try {
-          const blob = await E.exportVideo({
-            sourceUrl: lead.url,
-            start,
-            end,
-            format: n.format,
-            look: payload.look,
-            captions: n.captionBurn ? this.parseCaptions(briefText) : [],
-            hook: { text: n.opts.cta || n.title, t: 0, duration: 2 },
-            cta: { text: n.opts.cta || 'Follow for more', t: Math.max(0, end - 2), duration: 2 },
-            musicMode,
-            onProgress: (pct) => this.setCreateProgress(true, 12 + Math.min(72, Math.max(0, Number(pct) || 0) * 0.72), 'Exporting locally…'),
-            signal: controller.signal,
-          });
-          if (blob instanceof Blob) {
-            const ext = (typeof E.extForBlob === 'function' && E.extForBlob(blob)) || 'mp4';
-            this.setCreateProgress(true, 86, 'Uploading export…');
-            videoUrl = await this.uploadBlob(blob, `${n.title}.${String(ext).replace(/[^a-z0-9]/gi, '') || 'mp4'}`);
-            exported = true;
-          }
-        } catch (e) {
-          this.toast('Local export failed; saving your footage instead.');
-        }
-      }
-
-      // Always upload raw footage as well.
-      this.setCreateProgress(true, 90, 'Uploading raw footage…');
-      for (const s of visual) {
+      // Upload raw footage with metadata. This is ingest, not an export.
+      this.setCreateProgress(true, 20, 'Uploading raw footage…');
+      let done = 0;
+      for (let i = 0; i < visual.length; i++) {
+        const s = visual[i];
         try {
           const file = s.file || s.blob;
-          const url = await this.uploadBlob(file, s.name || 'clip.mp4');
+          const url = await this.uploadBlob(file, s.name || 'clip.mp4', {
+            kind: 'raw', batch: 'intake', ofIndex: i + 1,
+          });
           payload.rawUrls.push(url);
+          payload.assets.push({
+            kind: 'raw', name: s.name || 'clip.mp4', url, remote: false,
+            ofIndex: i + 1, analysis: null,
+          });
         } catch (e) { /* one clip failing should not block the reel */ }
+        done++;
+        this.setCreateProgress(true, 20 + Math.round((done / visual.length) * 50), 'Uploading raw footage…');
       }
 
-      if (exported && videoUrl) {
-        payload.status = 'review';
-        payload.videoUrl = videoUrl;
-      } else {
-        payload.status = 'received';
-        payload.videoUrl = payload.rawUrls[0] || '';
-        this.toast('Local export unavailable here; your footage was saved for editing.');
+      // Reference files are uploaded as media assets, but their analysis was
+      // computed locally before upload and is stored alongside the asset row.
+      for (let i = 0; i < (n.referenceAssets || []).length; i++) {
+        const a = n.referenceAssets[i];
+        try {
+          const url = await this.uploadBlob(a.file, a.name || 'reference', {
+            kind: a.kind || 'reference', batch: 'references', ofIndex: i + 1,
+          });
+          const existing = payload.assets.find((x) => x.name === a.name && x.kind === a.kind && !x.url);
+          const asset = existing || { kind: a.kind || 'reference', name: a.name || 'reference' };
+          asset.url = url;
+          asset.remote = false;
+          asset.ofIndex = i + 1;
+          asset.analysis = a.analysis || null;
+          if (!existing) payload.assets.push(asset);
+        } catch (e) { /* reference upload is best effort */ }
       }
+
+      payload.videoUrl = payload.rawUrls[0] || '';
+      this.setCreateProgress(true, 80, 'Saving approved storyboard…');
 
       let created = null;
       try {
         const data = await this.request('/reels', { method: 'POST', body: payload });
         created = data.reel || null;
+        if (created) {
+          const approval = await this.request(`/reels/${created.id}/review`, {
+            method: 'POST',
+            body: { action: 'approve-storyboard', version: 1, text: 'Approved in New Reel step 4.', idem: this.idem() },
+          });
+          if (approval.reel) created = approval.reel;
+        }
       } catch (e) {
-        this.toast('Reel saved locally; service did not accept it.');
+        this.toast('Reel saved locally; approval could not be recorded on the service.');
       }
       this.finishCreate(created, payload, briefText);
     } catch (e) {
@@ -1934,7 +2347,7 @@ const app = {
         <div class="completion">
           <div class="big-check">✓</div>
           <h3>Reel created</h3>
-          <p>${this.esc(r.status === 'waiting' ? 'Your link is saved. Editing from links needs the Lumi service.' : 'Your reel is saved and ready for review.')}</p>
+          <p>${this.esc(r.status === 'waiting' ? 'Your link is saved. Editing from links needs the Lumi service.' : 'Your approved storyboard and footage are saved. Open Edit to render a real local export.')}</p>
           <div class="btn-row" style="margin-top:18px">
             <button class="btn btn-primary" onclick="app.openTab('reels')">View reel</button>
             <button class="btn btn-secondary" data-action="review" data-id="${id}">Review</button>
@@ -1954,9 +2367,18 @@ const app = {
     if (!reel) return;
     const src = this.reelVideoUrl(reel);
     const canExport = this.editorCan('exportVideo');
+    const hasPlan = !!(reel.plan || (Array.isArray(reel.storyboard) && reel.storyboard.length));
+    const approved = !hasPlan || reel.stage === 'approved' || reel.status === 'done';
+    const plan = reel.plan || (Array.isArray(reel.storyboard) && reel.storyboard.length
+      ? { scenes: reel.storyboard, planner: 'on-device AI planner', method: 'saved storyboard' }
+      : null);
     const looks = this.catalogList('templates').map((l) => `<option value="${this.esc(l.id)}" ${String(reel.look || reel.style || this.state.draft.look) === String(l.id) ? 'selected' : ''}>${this.esc(l.name)}</option>`).join('');
 
     const body = `
+      ${hasPlan ? `<div class="plan-banner ${approved ? 'ok' : ''}">
+        <div class="spread"><strong>On-device plan v${this.esc(reel.planVersion || 1)}</strong><span>${this.esc(reel.stage || 'storyboard')}</span></div>
+        <p>${approved ? 'Approved — local export is unlocked.' : 'Export is locked. Approve the storyboard in Review before rendering.'}</p>
+      </div>` : ''}
       ${src ? `<video id="edit-video" class="review-video" src="${this.esc(src)}" muted playsinline controls preload="metadata"></video>` : '<p class="muted">No playable source in this deployment. Upload a video to enable export.</p>'}
       ${!canExport ? '<p class="hint">Local export is not supported by this browser engine. You can still save a version note.</p>' : ''}
       <div class="spread" style="margin-top:10px"><span class="timecode" id="edit-time">0:00</span><span class="tiny muted">Set start & end</span></div>
@@ -1968,7 +2390,7 @@ const app = {
       <div class="field"><label>Format</label><select id="edit-format"><option value="vertical">Vertical 9:16</option><option value="horizontal">Horizontal</option></select></div>
       <div class="field"><label>Look</label><select id="edit-look">${looks}</select></div>
       <div class="section-title">Captions & copy</div>
-      <div class="field"><label>Captions (one per line: 0:03 text)</label><textarea id="edit-captions" placeholder="0:00 Hook line\n0:03 Second line">${this.esc(Array.isArray(reel.captions) ? reel.captions.map((c) => `${this.fmtTime(c.t)} ${c.text || ''}`).join('\n') : '')}</textarea></div>
+      <div class="field"><label>Captions (one per line: 0:03 text)</label><textarea id="edit-captions" placeholder="0:00 Hook line\n0:03 Second line">${this.esc(this.editorCaptionText(reel, plan))}</textarea></div>
       <div class="fields-row">
         <div class="field"><label>Hook text</label><input id="edit-hook" type="text" value="${this.esc(reel.hookText || reel.title || '')}" /></div>
       </div>
@@ -1979,18 +2401,20 @@ const app = {
     const foot = `
       <div class="btn-row">
         <button class="btn btn-secondary" id="edit-save-note">Save version</button>
-        <button class="btn btn-primary" id="edit-export" ${src && canExport ? '' : 'disabled'}>Export</button>
+        <button class="btn btn-ghost hidden" id="edit-cancel">Cancel export</button>
+        <button class="btn btn-primary" id="edit-export" ${src && canExport && approved ? '' : 'disabled'}>Export</button>
       </div>`;
 
     this.showSheet(`Edit · ${reel.title || 'Reel'}`, body, foot, {
-      onMount: (overlay) => this.bindEditor(overlay, reel, src),
+      onMount: (overlay) => this.bindEditor(overlay, reel, src, plan, approved),
     });
   },
 
-  bindEditor(overlay, reel, src) {
+  bindEditor(overlay, reel, src, plan, approved) {
     const video = overlay.querySelector('#edit-video');
     const start = overlay.querySelector('#edit-start');
     const end = overlay.querySelector('#edit-end');
+    let exportController = null;
     let duration = Number(reel.duration) || 0;
     const setDur = (d) => {
       if (!isFinite(d) || d <= 0) return;
@@ -2015,17 +2439,37 @@ const app = {
       if (l && label) l.textContent = label;
     };
 
+    overlay.querySelector('#edit-cancel')?.addEventListener('click', () => {
+      if (exportController) exportController.abort();
+    });
+
     overlay.querySelector('#edit-export')?.addEventListener('click', async (e) => {
       if (!src || !this.editorCan('exportVideo')) { this.toast('Export is unavailable here.'); return; }
+      if (!approved) { this.toast('Approve the storyboard in Review before exporting.'); return; }
       const btn = e.currentTarget;
+      const cancel = overlay.querySelector('#edit-cancel');
       btn.disabled = true;
+      if (cancel) cancel.classList.remove('hidden');
       const s = Math.max(0, Number(start?.value) || 0);
       const en = Math.max(s + 0.5, Number(end?.value) || duration || s + 5);
+      exportController = new AbortController();
       try {
         const E = this.editor();
-        setProgress(true, 5, 'Exporting…');
+        setProgress(true, 5, 'Exporting locally…');
+        const span = Math.max(0.5, en - s);
+        const assetClips = (Array.isArray(reel.assets) ? reel.assets : [])
+          .filter((a) => a && a.kind === 'raw' && a.url)
+          .map((a, i, all) => ({
+            url: a.url,
+            start: 0,
+            duration: span / all.length,
+            label: a.name || `Clip ${i + 1}`,
+          }));
+        const clips = assetClips.length ? assetClips : [{ url: src, start: 0, duration: span, label: 'Source' }];
         const blob = await E.exportVideo({
           sourceUrl: src,
+          clips,
+          plan,
           start: s,
           end: en,
           format: overlay.querySelector('#edit-format')?.value || 'vertical',
@@ -2034,25 +2478,30 @@ const app = {
           hook: { text: overlay.querySelector('#edit-hook')?.value || '', t: s, duration: 2 },
           cta: { text: overlay.querySelector('#edit-cta')?.value || '', t: Math.max(s, en - 2), duration: 2 },
           musicMode: overlay.querySelector('#edit-music')?.value || 'source',
-          onProgress: (p) => setProgress(true, 5 + Math.min(90, (Number(p) || 0) * 0.9), 'Exporting…'),
-          signal: new AbortController().signal,
+          onProgress: (p) => setProgress(true, 5 + Math.min(90, (Number(p) || 0) * 0.9), 'Exporting locally…'),
+          signal: exportController.signal,
         });
         if (!(blob instanceof Blob)) throw new Error('No export was produced');
         setProgress(true, 96, 'Uploading…');
         const ext = (typeof E.extForBlob === 'function' && E.extForBlob(blob)) || 'mp4';
-        const videoUrl = await this.uploadBlob(blob, `${reel.title || 'reel'}.${String(ext).replace(/[^a-z0-9]/gi, '') || 'mp4'}`);
-        await this.request(`/reels/${reel.id}/version`, {
-          method: 'POST',
-          body: { videoUrl, noMusicUrl: '', posterUrl: this.reelPosterUrl(reel) || '', note: 'Browser export', idem: this.idem() },
+        const videoUrl = await this.uploadBlob(blob, `${reel.title || 'reel'}.${String(ext).replace(/[^a-z0-9]/gi, '') || 'mp4'}`, {
+          kind: 'export', batch: 'versions', ofIndex: this.reelVersion(reel) + 1, reelId: reel.id,
         });
+        const data = await this.request(`/reels/${reel.id}/version`, {
+          method: 'POST',
+          body: { videoUrl, noMusicUrl: '', posterUrl: this.reelPosterUrl(reel) || '', note: 'Local browser export', idem: this.idem() },
+        });
+        if (data.reel) Object.assign(reel, data.reel);
         this.closeSheet();
-        this.toast('New version saved.');
+        this.toast('Local export saved as a new version.');
         this.loadReels();
       } catch (err) {
         setProgress(false, 0, '');
-        this.toast(err.message || 'Export failed');
+        this.toast(err.name === 'AbortError' ? 'Export cancelled.' : (err.message || 'Export failed'));
       } finally {
+        exportController = null;
         btn.disabled = false;
+        if (cancel) cancel.classList.add('hidden');
       }
     });
 

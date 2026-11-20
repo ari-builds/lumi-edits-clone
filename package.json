@@ -5,9 +5,11 @@
   "main": "app/app.js",
   "scripts": {
     "dev": "vercel dev",
+    "local": "node tools/local-server.cjs",
     "build": "echo 'No build step required - vanilla JS'",
     "smoke:parity": "node tools/smoke-lumi-parity.cjs",
     "smoke:flow": "node tools/smoke-lumi-flow.cjs",
+    "smoke:plan": "node tools/smoke-lumi-plan.cjs",
     "check:db": "node tools/check-db.cjs",
     "extract:lumi": "node tools/extract-lumi-scripts.cjs"
   },
